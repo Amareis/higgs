@@ -30,7 +30,7 @@ higgs serve --model mlx-community/Llama-3.2-1B-Instruct-4bit
 higgs serve --model mlx-community/Llama-3.2-1B-Instruct-4bit --model mlx-community/Qwen3-1.7B-4bit
 ```
 
-Accepts HuggingFace model IDs (resolved from `~/.cache/huggingface/hub/`) or local paths. Prompts to download if not cached. Models must be **MLX safetensors format** from [mlx-community](https://huggingface.co/mlx-community).
+Accepts HuggingFace model IDs (resolved from `~/.cache/huggingface/hub/`) or local paths. Prompts to download if not cached. Models must be **MLX safetensors format** with a supported `config.json` `model_type` (for example from [mlx-community](https://huggingface.co/mlx-community)).
 
 ### Gateway mode (config file)
 
@@ -68,7 +68,7 @@ Each profile gets isolated runtime files (`higgs.<profile>.pid`, `higgs.<profile
 - **Continuous batching** -- 755 tok/s aggregate at 8 concurrent requests
 - **Radix tree prefix cache** -- shared prefix reuse across requests
 - **Vision** -- multimodal image+text (LLaVA-Qwen2)
-- **11 architectures** -- LLaMA, Mistral, Qwen2/3, Qwen3-MoE, Qwen3-Next, Gemma 2, Phi-3, Starcoder2, DeepSeek-V2, LLaVA-Qwen2
+- **13 architecture variants** -- LLaMA, Mistral, Qwen2, Qwen3, Qwen3.5 (dense + MoE), Qwen3-Next, Qwen3-MoE, Gemma 2, Phi-3, Starcoder2, DeepSeek-V2, LLaVA-Qwen2
 
 ### Gateway
 - **Remote providers** -- proxy requests to OpenAI, Anthropic, Ollama, or any OpenAI-compatible API
@@ -274,12 +274,16 @@ higgs exec -- aider --model openai/gpt-4o
 
 ## Supported Architectures
 
+Higgs detects support from `config.json` `model_type`. The examples below are representative, not exhaustive.
+
 | Architecture | `model_type` | Examples |
 |---|---|---|
 | LLaMA | `llama` | Llama 3/3.1, CodeLlama |
 | Mistral | `mistral` | Mistral 7B |
 | Qwen2 | `qwen2` | Qwen2, Qwen2.5 |
 | Qwen3 | `qwen3` | Qwen3 |
+| Qwen3.5 (dense) | `qwen3_5` | Qwen3.5 dense MLX checkpoints |
+| Qwen3.5 / Qwen3.6 MoE | `qwen3_5_moe` | Qwen3.5-35B-A3B, Qwen3.6-35B-A3B |
 | Qwen3-Next | `qwen3_next` | Qwen3-Coder (SSM hybrid) |
 | Qwen3-MoE | `qwen3_moe` | Qwen3-30B-A3B (sparse MoE) |
 | Gemma 2 | `gemma2` | Gemma 2 2B/9B/27B |
@@ -287,6 +291,26 @@ higgs exec -- aider --model openai/gpt-4o
 | Starcoder2 | `starcoder2` | Starcoder2 3B/7B/15B |
 | DeepSeek-V2 | `deepseek_v2` | DeepSeek-V2-Lite (MLA + MoE) |
 | LLaVA-Qwen2 | `llava-qwen2` | nanoLLaVA-1.5 (vision) |
+
+### Known Working MLX Examples
+
+These are concrete model IDs that have been used on this branch or are representative of currently supported families:
+
+| Family | Example model IDs |
+|---|---|
+| LLaMA | `mlx-community/Llama-3.2-1B-Instruct-4bit` |
+| Qwen3 | `mlx-community/Qwen3-1.7B-4bit` |
+| Qwen3-Next | `mlx-community/Qwen3-Coder-Next-4bit` |
+| Qwen3.5 dense | `mlx-community/Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-4bit` |
+| Qwen3.5 MoE | `NexVeridian/Qwen3.5-35B-A3B-3bit` |
+| Qwen3.6 MoE | `mlx-community/Qwen3.6-35B-A3B-4bit` |
+| DeepSeek-V2 | `mlx-community/DeepSeek-Coder-V2-Lite-Instruct-4bit-mlx` |
+
+### Notes On Qwen 3.6
+
+- `Qwen3.6` support is included in this branch through the `qwen3_5_moe` loader path.
+- The branch has been smoke-tested against `mlx-community/Qwen3.6-35B-A3B-4bit`.
+- By default, OpenAI-style chat requests now use non-thinking mode for `Qwen3.6` unless the request explicitly opts into reasoning.
 
 ## Performance
 
