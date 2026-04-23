@@ -102,7 +102,7 @@ jobs:
           toolchain: stable
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@70e00552f3196d9a4c7dde7c57ef4c4830d422dd # v2
+        uses: taiki-e/install-action@74e87cbfa15a59692b158178d8905a61bf6fca95 # v2
         with:
           tool: cargo-llvm-cov
 
