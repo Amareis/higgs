@@ -4482,12 +4482,11 @@ mod tests {
             ("missing.weight", &placeholder),
         ])
         .unwrap_err();
-        match err {
-            ModelError::MissingWeight(message) => {
-                assert!(message.contains("1 model params"));
-                assert!(message.contains("missing.weight"));
-            }
-            other => panic!("expected MissingWeight, got {other:?}"),
+        if let ModelError::MissingWeight(message) = err {
+            assert!(message.contains("1 model params"));
+            assert!(message.contains("missing.weight"));
+        } else {
+            panic!("expected MissingWeight");
         }
     }
 
