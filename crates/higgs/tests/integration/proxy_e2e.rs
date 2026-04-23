@@ -11,8 +11,7 @@
     clippy::tests_outside_test_module,
     clippy::needless_pass_by_value,
     clippy::unreadable_literal,
-    clippy::needless_borrows_for_generic_args,
-    clippy::duration_suboptimal_units
+    clippy::needless_borrows_for_generic_args
 )]
 
 use std::collections::HashMap;
@@ -30,6 +29,8 @@ use higgs::config::ApiFormat;
 use higgs::metrics::MetricsStore;
 use higgs::router::Router;
 use higgs::state::AppState;
+
+const METRICS_WINDOW_SECS: u64 = 60;
 
 fn build_test_state(mock_url: &str, format: ApiFormat) -> Arc<AppState> {
     let dir = tempfile::tempdir().unwrap();
@@ -56,7 +57,7 @@ fn build_test_state(mock_url: &str, format: ApiFormat) -> Arc<AppState> {
     let config = higgs::config::load_config_file(&config_path, None).unwrap();
 
     let router = Router::from_config(&config, HashMap::new()).unwrap();
-    let metrics = Arc::new(MetricsStore::new(Duration::from_secs(60)));
+    let metrics = Arc::new(MetricsStore::new(Duration::from_secs(METRICS_WINDOW_SECS)));
 
     Arc::new(AppState {
         router,
@@ -207,7 +208,7 @@ async fn proxy_model_rewrite() {
     std::fs::write(&config_path, &config_toml).unwrap();
     let config = higgs::config::load_config_file(&config_path, None).unwrap();
     let router = Router::from_config(&config, HashMap::new()).unwrap();
-    let metrics = Arc::new(MetricsStore::new(Duration::from_secs(60)));
+    let metrics = Arc::new(MetricsStore::new(Duration::from_secs(METRICS_WINDOW_SECS)));
     let state = Arc::new(AppState {
         router,
         config,

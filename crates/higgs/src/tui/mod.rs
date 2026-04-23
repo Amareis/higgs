@@ -355,18 +355,15 @@ pub fn run(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::panic,
-    clippy::unwrap_used,
-    clippy::indexing_slicing,
-    clippy::duration_suboptimal_units
-)]
+#[allow(clippy::panic, clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
+    const METRICS_WINDOW_SECS: u64 = 60;
+
     fn make_app() -> App {
         App::new(
-            Arc::new(MetricsStore::new(Duration::from_secs(60))),
+            Arc::new(MetricsStore::new(Duration::from_secs(METRICS_WINDOW_SECS))),
             false,
             None,
         )
@@ -374,7 +371,7 @@ mod tests {
 
     fn make_attached_app() -> App {
         App::new(
-            Arc::new(MetricsStore::new(Duration::from_secs(60))),
+            Arc::new(MetricsStore::new(Duration::from_secs(METRICS_WINDOW_SECS))),
             true,
             None,
         )
