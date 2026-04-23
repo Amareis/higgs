@@ -378,23 +378,33 @@ impl SimpleEngine {
         self.enable_thinking
     }
 
-    /// Apply chat template and tokenize messages.
-    pub fn prepare_chat_prompt(
+    /// Apply chat template and tokenize messages with explicit thinking control.
+    pub fn prepare_chat_prompt_with_thinking(
         &self,
         messages: &[ChatMessage],
         tools: Option<&[serde_json::Value]>,
+        enable_thinking: bool,
     ) -> Result<Vec<u32>, EngineError> {
         let renderer = self.template.as_ref().ok_or_else(|| {
             EngineError::Template(
                 "This model has no chat template; use /v1/completions instead".to_owned(),
             )
         })?;
-        let prompt = renderer.apply_with_thinking(messages, tools, true, self.enable_thinking)?;
+        let prompt = renderer.apply_with_thinking(messages, tools, true, enable_thinking)?;
         let encoding = self
             .tokenizer
             .encode(prompt.as_str(), false)
             .map_err(|e| EngineError::Tokenization(e.to_string()))?;
         Ok(encoding.get_ids().to_vec())
+    }
+
+    /// Apply chat template and tokenize messages.
+    pub fn prepare_chat_prompt(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[serde_json::Value]>,
+    ) -> Result<Vec<u32>, EngineError> {
+        self.prepare_chat_prompt_with_thinking(messages, tools, self.enable_thinking)
     }
 
     /// Whether the loaded model is a vision-language model.
@@ -832,6 +842,32 @@ impl SimpleEngine {
         constraint: Option<crate::constrained::ConstrainedGenerator>,
         pixel_values: Option<Array>,
     ) -> Result<GenerationOutput, EngineError> {
+        self.generate_with_thinking(
+            prompt_tokens,
+            max_tokens,
+            params,
+            stop_sequences,
+            logprobs,
+            top_logprobs,
+            self.enable_thinking,
+            constraint,
+            pixel_values,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_with_thinking(
+        &self,
+        prompt_tokens: &[u32],
+        max_tokens: u32,
+        params: &SamplingParams,
+        stop_sequences: &[String],
+        logprobs: bool,
+        top_logprobs: Option<u32>,
+        enable_thinking: bool,
+        constraint: Option<crate::constrained::ConstrainedGenerator>,
+        pixel_values: Option<Array>,
+    ) -> Result<GenerationOutput, EngineError> {
         if prompt_tokens.is_empty() {
             return Err(EngineError::Generation("Prompt is empty".to_owned()));
         }
@@ -855,6 +891,7 @@ impl SimpleEngine {
                 stop_sequences,
                 logprobs,
                 top_logprobs,
+                enable_thinking,
                 constraint,
                 pixel_values,
             )
@@ -874,6 +911,7 @@ impl SimpleEngine {
         stop_sequences: &[String],
         logprobs: bool,
         top_logprobs: Option<u32>,
+        enable_thinking: bool,
         mut constraint: Option<crate::constrained::ConstrainedGenerator>,
         pixel_values: Option<Array>,
     ) -> Result<GenerationOutput, EngineError> {
@@ -951,6 +989,7 @@ impl SimpleEngine {
                 prompt_len,
                 &mut tokens,
                 stop_sequences,
+                enable_thinking,
             );
         }
 
@@ -987,7 +1026,7 @@ impl SimpleEngine {
 
         // Thinking budget: force </think> after N tokens if model hasn't closed it.
         const THINKING_BUDGET: u32 = 256;
-        let think_close_token = if self.enable_thinking {
+        let think_close_token = if enable_thinking {
             self.think_close_token
         } else {
             None
@@ -1210,6 +1249,7 @@ impl SimpleEngine {
         prompt_len: u32,
         tokens: &mut Vec<u32>,
         stop_sequences: &[String],
+        enable_thinking: bool,
     ) -> Result<GenerationOutput, EngineError> {
         let has_stop_sequences = !stop_sequences.is_empty();
 
@@ -1238,7 +1278,7 @@ impl SimpleEngine {
 
         // Thinking budget: force </think> after N tokens if model hasn't closed it.
         const THINKING_BUDGET: u32 = 256;
-        let think_close_token = if self.enable_thinking {
+        let think_close_token = if enable_thinking {
             self.think_close_token
         } else {
             None
@@ -1367,6 +1407,7 @@ impl SimpleEngine {
         stop_sequences: &[String],
         sender: &tokio::sync::mpsc::Sender<StreamingOutput>,
         mut prev_decoded_len: usize,
+        enable_thinking: bool,
     ) -> Result<(), EngineError> {
         let has_stop_sequences = !stop_sequences.is_empty();
 
@@ -1390,7 +1431,7 @@ impl SimpleEngine {
         let t_start = std::time::Instant::now();
 
         const THINKING_BUDGET: u32 = 256;
-        let think_close_token = if self.enable_thinking {
+        let think_close_token = if enable_thinking {
             self.think_close_token
         } else {
             None
@@ -1528,6 +1569,34 @@ impl SimpleEngine {
         constraint: Option<crate::constrained::ConstrainedGenerator>,
         pixel_values: Option<Array>,
     ) -> Result<(), EngineError> {
+        self.generate_streaming_with_thinking(
+            prompt_tokens,
+            max_tokens,
+            params,
+            stop_sequences,
+            logprobs,
+            top_logprobs,
+            sender,
+            self.enable_thinking,
+            constraint,
+            pixel_values,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_streaming_with_thinking(
+        &self,
+        prompt_tokens: &[u32],
+        max_tokens: u32,
+        params: &SamplingParams,
+        stop_sequences: &[String],
+        logprobs: bool,
+        top_logprobs: Option<u32>,
+        sender: &tokio::sync::mpsc::Sender<StreamingOutput>,
+        enable_thinking: bool,
+        constraint: Option<crate::constrained::ConstrainedGenerator>,
+        pixel_values: Option<Array>,
+    ) -> Result<(), EngineError> {
         if prompt_tokens.is_empty() {
             return Err(EngineError::Generation("Prompt is empty".to_owned()));
         }
@@ -1553,6 +1622,7 @@ impl SimpleEngine {
                 logprobs,
                 top_logprobs,
                 sender,
+                enable_thinking,
                 constraint,
                 pixel_values,
             )
@@ -1573,6 +1643,7 @@ impl SimpleEngine {
         logprobs: bool,
         top_logprobs: Option<u32>,
         sender: &tokio::sync::mpsc::Sender<StreamingOutput>,
+        enable_thinking: bool,
         mut constraint: Option<crate::constrained::ConstrainedGenerator>,
         pixel_values: Option<Array>,
     ) -> Result<(), EngineError> {
@@ -1656,12 +1727,13 @@ impl SimpleEngine {
                 stop_sequences,
                 sender,
                 prev_decoded_len,
+                enable_thinking,
             );
         }
 
         // Thinking budget (streaming): force </think> after N tokens.
         const THINKING_BUDGET: u32 = 256;
-        let think_close_token = if self.enable_thinking {
+        let think_close_token = if enable_thinking {
             self.think_close_token
         } else {
             None

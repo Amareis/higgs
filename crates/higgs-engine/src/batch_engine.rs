@@ -152,6 +152,16 @@ impl BatchEngine {
     }
 
     /// Apply chat template and tokenize messages.
+    pub fn prepare_chat_prompt_with_thinking(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[serde_json::Value]>,
+        _enable_thinking: bool,
+    ) -> Result<Vec<u32>, EngineError> {
+        self.prepare_chat_prompt(messages, tools)
+    }
+
+    /// Apply chat template and tokenize messages.
     pub fn prepare_chat_prompt(
         &self,
         messages: &[ChatMessage],
@@ -175,6 +185,32 @@ impl BatchEngine {
         stop_sequences: &[String],
         logprobs: bool,
         top_logprobs: Option<u32>,
+        constraint: Option<crate::constrained::ConstrainedGenerator>,
+        pixel_values: Option<mlx_rs::Array>,
+    ) -> Result<GenerationOutput, EngineError> {
+        self.generate_with_thinking(
+            prompt_tokens,
+            max_tokens,
+            params,
+            stop_sequences,
+            logprobs,
+            top_logprobs,
+            false,
+            constraint,
+            pixel_values,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    pub fn generate_with_thinking(
+        &self,
+        prompt_tokens: &[u32],
+        max_tokens: u32,
+        params: &SamplingParams,
+        stop_sequences: &[String],
+        logprobs: bool,
+        top_logprobs: Option<u32>,
+        _enable_thinking: bool,
         constraint: Option<crate::constrained::ConstrainedGenerator>,
         pixel_values: Option<mlx_rs::Array>,
     ) -> Result<GenerationOutput, EngineError> {
@@ -257,6 +293,34 @@ impl BatchEngine {
         logprobs: bool,
         top_logprobs: Option<u32>,
         sender: &tokio::sync::mpsc::Sender<StreamingOutput>,
+        constraint: Option<crate::constrained::ConstrainedGenerator>,
+        pixel_values: Option<mlx_rs::Array>,
+    ) -> Result<(), EngineError> {
+        self.generate_streaming_with_thinking(
+            prompt_tokens,
+            max_tokens,
+            params,
+            stop_sequences,
+            logprobs,
+            top_logprobs,
+            sender,
+            false,
+            constraint,
+            pixel_values,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    pub fn generate_streaming_with_thinking(
+        &self,
+        prompt_tokens: &[u32],
+        max_tokens: u32,
+        params: &SamplingParams,
+        stop_sequences: &[String],
+        logprobs: bool,
+        top_logprobs: Option<u32>,
+        sender: &tokio::sync::mpsc::Sender<StreamingOutput>,
+        _enable_thinking: bool,
         constraint: Option<crate::constrained::ConstrainedGenerator>,
         pixel_values: Option<mlx_rs::Array>,
     ) -> Result<(), EngineError> {

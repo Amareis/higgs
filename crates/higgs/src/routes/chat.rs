@@ -23,11 +23,31 @@ use crate::{
     types::openai::{
         ChatCompletionChoice, ChatCompletionChunk, ChatCompletionChunkChoice, ChatCompletionDelta,
         ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse, ChoiceLogprobs,
-        CompletionUsage, MessageContent, StopSequence, TokenLogprob, ToolCall, ToolCallFunction,
-        TopLogprob,
+        CompletionUsage, MessageContent, ReasoningConfig, StopSequence, TokenLogprob, ToolCall,
+        ToolCallFunction, TopLogprob,
     },
 };
 use higgs_models::SamplingParams;
+
+fn model_defaults_to_non_thinking(model_name: &str) -> bool {
+    model_name.to_ascii_lowercase().contains("qwen3.6")
+}
+
+fn effective_thinking_enabled(
+    engine_default: bool,
+    model_name: &str,
+    reasoning: Option<&ReasoningConfig>,
+) -> bool {
+    if !engine_default {
+        return false;
+    }
+
+    match reasoning.and_then(|r| r.effort.as_deref()) {
+        Some(effort) if effort.eq_ignore_ascii_case("none") => false,
+        Some(_) => true,
+        None => !model_defaults_to_non_thinking(model_name),
+    }
+}
 
 #[allow(clippy::too_many_lines)]
 pub async fn chat_completions(
@@ -269,9 +289,14 @@ async fn chat_completions_non_streaming(
 
     let messages = convert_messages(&effective_messages);
     let tools = req.tools.as_deref();
+    let thinking_enabled = effective_thinking_enabled(
+        engine.enable_thinking(),
+        engine.model_name(),
+        req.reasoning.as_ref(),
+    );
 
     let mut prompt_tokens = engine
-        .prepare_chat_prompt(&messages, tools)
+        .prepare_chat_prompt_with_thinking(&messages, tools, thinking_enabled)
         .map_err(ServerError::Engine)?;
 
     // Preprocess images for VLM
@@ -294,15 +319,15 @@ async fn chat_completions_non_streaming(
     let constraint = build_constraint(req.response_format.as_ref(), &engine)?;
 
     let tokenizer = engine.tokenizer().clone();
-    let thinking_enabled = engine.enable_thinking();
     let output = tokio::task::spawn_blocking(move || {
-        engine.generate(
+        engine.generate_with_thinking(
             &prompt_tokens,
             max_tokens,
             &sampling,
             &stop_sequences,
             want_logprobs,
             top_logprobs,
+            thinking_enabled,
             constraint,
             pixel_values,
         )
@@ -438,10 +463,15 @@ fn chat_completions_stream(
     };
 
     let messages = convert_messages(&effective_messages);
+    let thinking_enabled_stream = effective_thinking_enabled(
+        engine.enable_thinking(),
+        engine.model_name(),
+        req.reasoning.as_ref(),
+    );
 
     // Exclude tools from streaming prompt — tool_calls deltas are unsupported.
     let mut prompt_tokens = engine
-        .prepare_chat_prompt(&messages, None)
+        .prepare_chat_prompt_with_thinking(&messages, None, thinking_enabled_stream)
         .map_err(ServerError::Engine)?;
 
     // Preprocess images for VLM
@@ -484,13 +514,11 @@ fn chat_completions_stream(
             error_body: None,
         })
     });
-
     let tokenizer = engine.tokenizer().clone();
-    let thinking_enabled_stream = engine.enable_thinking();
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
 
     tokio::task::spawn_blocking(move || {
-        let result = engine.generate_streaming(
+        let result = engine.generate_streaming_with_thinking(
             &prompt_tokens,
             max_tokens,
             &sampling,
@@ -498,6 +526,7 @@ fn chat_completions_stream(
             want_logprobs,
             top_logprobs,
             &tx,
+            thinking_enabled_stream,
             constraint,
             pixel_values,
         );
@@ -898,6 +927,7 @@ fn current_unix_timestamp() -> i64 {
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::types::openai::ReasoningConfig;
 
     fn simple_message(role: &str, content: Option<&str>) -> ChatCompletionMessage {
         ChatCompletionMessage {
@@ -1015,5 +1045,45 @@ mod tests {
     fn test_current_unix_timestamp_reasonable_value() {
         let ts = current_unix_timestamp();
         assert!(ts > 1_700_000_000, "timestamp too old: {ts}");
+    }
+
+    #[test]
+    fn test_effective_thinking_enabled_defaults_qwen35_on() {
+        assert!(effective_thinking_enabled(
+            true,
+            "mlx-community/Qwen3.5-foo",
+            None
+        ));
+    }
+
+    #[test]
+    fn test_effective_thinking_enabled_defaults_qwen36_off() {
+        assert!(!effective_thinking_enabled(
+            true,
+            "mlx-community/Qwen3.6-35B-A3B-4bit",
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_effective_thinking_enabled_honors_reasoning_none() {
+        assert!(!effective_thinking_enabled(
+            true,
+            "mlx-community/Qwen3.5-foo",
+            Some(&ReasoningConfig {
+                effort: Some("none".to_owned()),
+            }),
+        ));
+    }
+
+    #[test]
+    fn test_effective_thinking_enabled_honors_explicit_reasoning_request() {
+        assert!(effective_thinking_enabled(
+            true,
+            "mlx-community/Qwen3.6-35B-A3B-4bit",
+            Some(&ReasoningConfig {
+                effort: Some("low".to_owned()),
+            }),
+        ));
     }
 }

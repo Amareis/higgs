@@ -130,6 +130,22 @@ impl Engine {
         }
     }
 
+    pub fn prepare_chat_prompt_with_thinking(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[serde_json::Value]>,
+        enable_thinking: bool,
+    ) -> Result<Vec<u32>, EngineError> {
+        match self {
+            Self::Simple(e) => {
+                e.prepare_chat_prompt_with_thinking(messages, tools, enable_thinking)
+            }
+            Self::Batch(e) => e.prepare_chat_prompt_with_thinking(messages, tools, enable_thinking),
+            #[cfg(test)]
+            Self::Stub(_) => Ok(Vec::new()),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn generate(
         &self,
@@ -142,24 +158,52 @@ impl Engine {
         constraint: Option<higgs_engine::constrained::ConstrainedGenerator>,
         pixel_values: Option<Array>,
     ) -> Result<GenerationOutput, EngineError> {
+        self.generate_with_thinking(
+            prompt_tokens,
+            max_tokens,
+            params,
+            stop_sequences,
+            logprobs,
+            top_logprobs,
+            self.enable_thinking(),
+            constraint,
+            pixel_values,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_with_thinking(
+        &self,
+        prompt_tokens: &[u32],
+        max_tokens: u32,
+        params: &SamplingParams,
+        stop_sequences: &[String],
+        logprobs: bool,
+        top_logprobs: Option<u32>,
+        enable_thinking: bool,
+        constraint: Option<higgs_engine::constrained::ConstrainedGenerator>,
+        pixel_values: Option<Array>,
+    ) -> Result<GenerationOutput, EngineError> {
         match self {
-            Self::Simple(e) => e.generate(
+            Self::Simple(e) => e.generate_with_thinking(
                 prompt_tokens,
                 max_tokens,
                 params,
                 stop_sequences,
                 logprobs,
                 top_logprobs,
+                enable_thinking,
                 constraint,
                 pixel_values,
             ),
-            Self::Batch(e) => e.generate(
+            Self::Batch(e) => e.generate_with_thinking(
                 prompt_tokens,
                 max_tokens,
                 params,
                 stop_sequences,
                 logprobs,
                 top_logprobs,
+                enable_thinking,
                 constraint,
                 pixel_values,
             ),
@@ -181,8 +225,36 @@ impl Engine {
         constraint: Option<higgs_engine::constrained::ConstrainedGenerator>,
         pixel_values: Option<Array>,
     ) -> Result<(), EngineError> {
+        self.generate_streaming_with_thinking(
+            prompt_tokens,
+            max_tokens,
+            params,
+            stop_sequences,
+            logprobs,
+            top_logprobs,
+            sender,
+            self.enable_thinking(),
+            constraint,
+            pixel_values,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_streaming_with_thinking(
+        &self,
+        prompt_tokens: &[u32],
+        max_tokens: u32,
+        params: &SamplingParams,
+        stop_sequences: &[String],
+        logprobs: bool,
+        top_logprobs: Option<u32>,
+        sender: &tokio::sync::mpsc::Sender<StreamingOutput>,
+        enable_thinking: bool,
+        constraint: Option<higgs_engine::constrained::ConstrainedGenerator>,
+        pixel_values: Option<Array>,
+    ) -> Result<(), EngineError> {
         match self {
-            Self::Simple(e) => e.generate_streaming(
+            Self::Simple(e) => e.generate_streaming_with_thinking(
                 prompt_tokens,
                 max_tokens,
                 params,
@@ -190,10 +262,11 @@ impl Engine {
                 logprobs,
                 top_logprobs,
                 sender,
+                enable_thinking,
                 constraint,
                 pixel_values,
             ),
-            Self::Batch(e) => e.generate_streaming(
+            Self::Batch(e) => e.generate_streaming_with_thinking(
                 prompt_tokens,
                 max_tokens,
                 params,
@@ -201,6 +274,7 @@ impl Engine {
                 logprobs,
                 top_logprobs,
                 sender,
+                enable_thinking,
                 constraint,
                 pixel_values,
             ),

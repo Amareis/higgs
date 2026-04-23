@@ -33,6 +33,14 @@ pub struct ChatCompletionRequest {
     pub logprobs: Option<bool>,
     #[serde(default)]
     pub top_logprobs: Option<u32>,
+    #[serde(default)]
+    pub reasoning: Option<ReasoningConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReasoningConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// Response format specification.
@@ -451,6 +459,7 @@ mod tests {
         assert_eq!(req.messages.len(), 1);
         assert!(req.stream.is_none());
         assert!(req.max_tokens.is_none());
+        assert!(req.reasoning.is_none());
     }
 
     #[test]
@@ -467,6 +476,21 @@ mod tests {
         let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.max_tokens, Some(100));
         assert!(req.stream == Some(true));
+        assert!(req.reasoning.is_none());
+    }
+
+    #[test]
+    fn test_chat_request_reasoning_deserialization() {
+        let json = r#"{
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning": {"effort": "none"}
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req.reasoning.and_then(|reasoning| reasoning.effort),
+            Some("none".to_owned())
+        );
     }
 
     #[test]
