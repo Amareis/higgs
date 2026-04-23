@@ -537,6 +537,8 @@ fn chat_completions_stream(
             higgs_engine::reasoning_parser::StreamingReasoningTracker::new()
         };
         let mut output_token_count: u32 = 0;
+        let mut pending_finish_reason: Option<String> = None;
+        let mut pending_finish_logprobs: Option<ChoiceLogprobs> = None;
 
         while let Some(output) = rx.recv().await {
             output_token_count = output.completion_tokens;
@@ -546,6 +548,7 @@ fn chat_completions_stream(
                 .map(|lp| logprobs_to_response(std::slice::from_ref(lp), &tokenizer));
 
             let (visible, reasoning) = reasoning_tracker.process(&output.new_text);
+            let visible_is_empty = visible.is_empty();
 
             // Emit reasoning chunk if there's reasoning content
             if !reasoning.is_empty() {
@@ -588,8 +591,8 @@ fn chat_completions_stream(
                             reasoning_content: None,
                             tool_calls: None,
                         },
-                        finish_reason: output.finish_reason.clone(),
-                        logprobs: chunk_logprobs,
+                        finish_reason: None,
+                        logprobs: chunk_logprobs.clone(),
                     }],
                     usage: None,
                 };
@@ -597,30 +600,11 @@ fn chat_completions_stream(
                     Ok(json) => yield Ok(Event::default().data(json)),
                     Err(e) => tracing::error!(error = %e, "Failed to serialize SSE chunk"),
                 }
-            } else if output.finish_reason.is_some() {
-                // Even if no visible text, still emit the finish_reason
-                let chunk = ChatCompletionChunk {
-                    id: request_id.clone(),
-                    object: "chat.completion.chunk",
-                    created,
-                    model: model.clone(),
-                    choices: vec![ChatCompletionChunkChoice {
-                        index: 0,
-                        delta: ChatCompletionDelta {
-                            role: None,
-                            content: None,
-                            reasoning_content: None,
-                            tool_calls: None,
-                        },
-                        finish_reason: output.finish_reason,
-                        logprobs: chunk_logprobs,
-                    }],
-                    usage: None,
-                };
-                match serde_json::to_string(&chunk) {
-                    Ok(json) => yield Ok(Event::default().data(json)),
-                    Err(e) => tracing::error!(error = %e, "Failed to serialize SSE chunk"),
-                }
+            }
+
+            if let Some(finish_reason) = output.finish_reason {
+                pending_finish_reason = Some(finish_reason);
+                pending_finish_logprobs = if visible_is_empty { chunk_logprobs } else { None };
             }
         }
 
@@ -670,6 +654,30 @@ fn chat_completions_stream(
                 usage: None,
             };
             match serde_json::to_string(&vis_chunk) {
+                Ok(json) => yield Ok(Event::default().data(json)),
+                Err(e) => tracing::error!(error = %e, "Failed to serialize SSE chunk"),
+            }
+        }
+        if pending_finish_reason.is_some() {
+            let chunk = ChatCompletionChunk {
+                id: request_id.clone(),
+                object: "chat.completion.chunk",
+                created,
+                model: model.clone(),
+                choices: vec![ChatCompletionChunkChoice {
+                    index: 0,
+                    delta: ChatCompletionDelta {
+                        role: None,
+                        content: None,
+                        reasoning_content: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: pending_finish_reason,
+                    logprobs: pending_finish_logprobs,
+                }],
+                usage: None,
+            };
+            match serde_json::to_string(&chunk) {
                 Ok(json) => yield Ok(Event::default().data(json)),
                 Err(e) => tracing::error!(error = %e, "Failed to serialize SSE chunk"),
             }

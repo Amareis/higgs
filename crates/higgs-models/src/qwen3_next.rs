@@ -3540,12 +3540,99 @@ fn load_qwen3_next_args_from_value(
     Ok(serde_json::from_value(config)?)
 }
 
+fn placeholder_param_names<'a, I, K>(params: I) -> Vec<String>
+where
+    I: IntoIterator<Item = (K, &'a Array)>,
+    K: AsRef<str>,
+{
+    params
+        .into_iter()
+        .filter(|(_, value)| value.shape() == [1])
+        .map(|(name, _)| name.as_ref().to_owned())
+        .collect()
+}
+
+fn ensure_all_model_params_loaded<'a, I, K>(params: I) -> Result<(), ModelError>
+where
+    I: IntoIterator<Item = (K, &'a Array)>,
+    K: AsRef<str>,
+{
+    let placeholders = placeholder_param_names(params);
+    if placeholders.is_empty() {
+        return Ok(());
+    }
+
+    let examples = placeholders
+        .iter()
+        .take(10)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(ModelError::MissingWeight(format!(
+        "{} model params were not loaded from the checkpoint; examples: {examples}",
+        placeholders.len()
+    )))
+}
+
+fn checkpoint_has_mtp_weights(model_path: &Path) -> Result<bool, ModelError> {
+    let index_path = model_path.join("model.safetensors.index.json");
+    if index_path.exists() {
+        let file = std::fs::File::open(index_path)?;
+        let index: serde_json::Value = serde_json::from_reader(file)?;
+        let Some(weight_map) = index
+            .get("weight_map")
+            .and_then(serde_json::Value::as_object)
+        else {
+            return Err(ModelError::UnsupportedModel(
+                "model.safetensors.index.json missing weight_map".into(),
+            ));
+        };
+        return Ok(weight_map
+            .keys()
+            .any(|key| key.starts_with("mtp.") || key.contains(".mtp.")));
+    }
+
+    for file_path in crate::collect_safetensors_files(model_path)? {
+        let loaded = Array::load_safetensors(&file_path)
+            .map_err(|e| ModelError::Io(std::io::Error::other(e.to_string())))?;
+        if loaded
+            .keys()
+            .any(|key| key.starts_with("mtp.") || key.contains(".mtp."))
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn maybe_disable_mtp_without_checkpoint_weights(
+    args: &mut Qwen3NextModelArgs,
+    model_path: &Path,
+) -> Result<(), ModelError> {
+    if args.mtp_num_hidden_layers <= 0 {
+        return Ok(());
+    }
+
+    if checkpoint_has_mtp_weights(model_path)? {
+        return Ok(());
+    }
+
+    tracing::warn!(
+        mtp_num_hidden_layers = args.mtp_num_hidden_layers,
+        "Config enables MTP but checkpoint has no MTP weights; disabling MTP for this load"
+    );
+    args.mtp_num_hidden_layers = 0;
+    Ok(())
+}
+
 /// Load a `Qwen3Next` model from a directory containing safetensors + config.json.
 pub fn load_qwen3_next_model<P: AsRef<Path>>(
     model_dir: P,
 ) -> Result<Qwen3NextCausalLM, ModelError> {
     let model_path = model_dir.as_ref();
-    let args = load_model_args(model_path)?;
+    let mut args = load_model_args(model_path)?;
+    maybe_disable_mtp_without_checkpoint_weights(&mut args, model_path)?;
 
     tracing::info!(
         model_type = %args.model_type,
@@ -3659,7 +3746,8 @@ fn load_qwen3_5_moe_text_config_args<P: AsRef<Path>>(
 /// `decoder_sparse_step=1` or attempt `MoE` gate fusion.
 pub fn load_qwen3_5_model<P: AsRef<Path>>(model_dir: P) -> Result<Qwen3NextCausalLM, ModelError> {
     let model_path = model_dir.as_ref();
-    let args = load_qwen3_5_moe_text_config_args(model_path)?;
+    let mut args = load_qwen3_5_moe_text_config_args(model_path)?;
+    maybe_disable_mtp_without_checkpoint_weights(&mut args, model_path)?;
 
     tracing::info!(
         hidden_size = args.hidden_size,
@@ -3700,7 +3788,8 @@ pub fn load_qwen3_5_moe_model<P: AsRef<Path>>(
     model_dir: P,
 ) -> Result<Qwen3NextCausalLM, ModelError> {
     let model_path = model_dir.as_ref();
-    let args = load_qwen3_5_moe_text_config_args(model_path)?;
+    let mut args = load_qwen3_5_moe_text_config_args(model_path)?;
+    maybe_disable_mtp_without_checkpoint_weights(&mut args, model_path)?;
 
     tracing::info!(
         hidden_size = args.hidden_size,
@@ -3875,21 +3964,11 @@ fn load_qwen3_5_moe_weights_direct<M: mlx_rs::module::ModuleParametersExt>(
         }
     }
     let param_count = params.len();
-    // Detect params still at their [1] placeholder (never loaded from checkpoint).
-    let placeholders: Vec<_> = params
-        .iter()
-        .filter(|(_, v)| v.shape() == [1])
-        .map(|(k, _)| k.to_string())
-        .collect();
-    if !placeholders.is_empty() {
-        tracing::warn!(
-            count = placeholders.len(),
-            "Model params still at [1] placeholder (no matching weight loaded)"
-        );
-        for k in placeholders.iter().take(10) {
-            tracing::warn!(key = %k, "Placeholder param");
-        }
-    }
+    ensure_all_model_params_loaded(
+        params
+            .iter()
+            .map(|(name, value)| (std::rc::Rc::<str>::clone(name), &**value)),
+    )?;
     tracing::info!(param_count, matched, "Total model parameters loaded");
 
     model
@@ -4001,6 +4080,11 @@ fn load_qwen3_5_moe_weights_fused<M: mlx_rs::module::ModuleParametersExt>(
         total_pairs = gdn_parts.len(),
         "Fused GDN projections (4→2 dispatches per layer)"
     );
+    ensure_all_model_params_loaded(
+        params
+            .iter()
+            .map(|(name, value)| (std::rc::Rc::<str>::clone(name), &**value)),
+    )?;
 
     model
         .eval()
@@ -4378,6 +4462,39 @@ mod tests {
         let gate_q = args.gate_quantization.unwrap();
         assert_eq!(gate_q.group_size, 64);
         assert_eq!(gate_q.bits, 8);
+    }
+
+    #[test]
+    fn test_placeholder_param_names_finds_shape_one_tensors() {
+        let loaded = Array::from_slice(&[1.0f32, 2.0], &[2]);
+        let placeholder = Array::from_slice(&[0.0f32], &[1]);
+        let names =
+            placeholder_param_names([("loaded.weight", &loaded), ("missing.weight", &placeholder)]);
+        assert_eq!(names, vec!["missing.weight".to_owned()]);
+    }
+
+    #[test]
+    fn test_ensure_all_model_params_loaded_errors_on_placeholders() {
+        let loaded = Array::from_slice(&[1.0f32, 2.0], &[2]);
+        let placeholder = Array::from_slice(&[0.0f32], &[1]);
+        let err = ensure_all_model_params_loaded([
+            ("loaded.weight", &loaded),
+            ("missing.weight", &placeholder),
+        ])
+        .unwrap_err();
+        match err {
+            ModelError::MissingWeight(message) => {
+                assert!(message.contains("1 model params"));
+                assert!(message.contains("missing.weight"));
+            }
+            other => panic!("expected MissingWeight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ensure_all_model_params_loaded_accepts_fully_loaded_params() {
+        let weight = Array::from_slice(&[1.0f32, 2.0], &[2]);
+        ensure_all_model_params_loaded([("loaded.weight", &weight)]).unwrap();
     }
 
     #[test]
@@ -12635,6 +12752,16 @@ mod tests {
         }"#
     }
 
+    fn write_weight_index(dir: &std::path::Path, keys: &[&str]) {
+        let weight_map = keys
+            .iter()
+            .map(|key| format!(r#""{key}": "model-00001-of-00001.safetensors""#))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let index = format!(r#"{{"metadata": {{}}, "weight_map": {{{weight_map}}}}}"#);
+        std::fs::write(dir.join("model.safetensors.index.json"), index).unwrap();
+    }
+
     #[test]
     fn test_load_qwen35_moe_text_config_moe_sets_decoder_sparse_step() {
         let dir = tempfile::tempdir().unwrap();
@@ -12659,6 +12786,44 @@ mod tests {
             "Dense model should NOT get decoder_sparse_step=1"
         );
         assert_eq!(args.num_experts, 0);
+    }
+
+    #[test]
+    fn test_checkpoint_has_mtp_weights_detects_prefixed_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        write_weight_index(
+            dir.path(),
+            &["language_model.mtp.layers.0.self_attn.q_proj.weight"],
+        );
+        assert!(checkpoint_has_mtp_weights(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn test_maybe_disable_mtp_without_checkpoint_weights_turns_off_missing_mtp() {
+        let dir = tempfile::tempdir().unwrap();
+        write_qwen35_config(dir.path(), qwen35_moe_text_config());
+        write_weight_index(
+            dir.path(),
+            &["language_model.model.layers.0.input_layernorm.weight"],
+        );
+        let mut args = load_qwen3_5_moe_text_config_args(dir.path()).unwrap();
+        args.mtp_num_hidden_layers = 1;
+        maybe_disable_mtp_without_checkpoint_weights(&mut args, dir.path()).unwrap();
+        assert_eq!(args.mtp_num_hidden_layers, 0);
+    }
+
+    #[test]
+    fn test_maybe_disable_mtp_without_checkpoint_weights_preserves_present_mtp() {
+        let dir = tempfile::tempdir().unwrap();
+        write_qwen35_config(dir.path(), qwen35_moe_text_config());
+        write_weight_index(
+            dir.path(),
+            &["language_model.mtp.layers.0.self_attn.q_proj.weight"],
+        );
+        let mut args = load_qwen3_5_moe_text_config_args(dir.path()).unwrap();
+        args.mtp_num_hidden_layers = 1;
+        maybe_disable_mtp_without_checkpoint_weights(&mut args, dir.path()).unwrap();
+        assert_eq!(args.mtp_num_hidden_layers, 1);
     }
 
     /// GQA ratio: `num_v_heads` must be divisible by `num_k_heads`.
