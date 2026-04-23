@@ -231,7 +231,11 @@ impl AnyModel {
             // Fallback: compute full forward then slice for other architectures
             (m, c) => {
                 let logits = m.forward(inputs, mask, c)?;
-                Ok(logits.index((.., -1.., ..)))
+                if logits.ndim() == 3 {
+                    Ok(logits.index((.., -1.., ..)))
+                } else {
+                    Ok(logits)
+                }
             }
         }
     }
@@ -421,15 +425,45 @@ impl AnyModel {
         }
     }
 
-    pub fn make_cache(&self) -> AnyCache {
-        // Default to dense KV storage when no explicit config is provided.
-        match self.make_cache_with_config(KvCacheConfig::default()) {
-            Ok(cache) => cache,
-            Err(err) => {
-                tracing::error!(error = %err, "dense cache creation unexpectedly failed");
-                AnyCache::KV(vec![])
-            }
+    pub fn kv_cache_geometry(&self) -> Result<(i32, i32), Exception> {
+        match self {
+            Self::Transformer(m) => Ok((
+                m.args.num_key_value_heads,
+                m.args
+                    .checked_head_dim()
+                    .map_err(|err| Exception::custom(err.to_string()))?,
+            )),
+            Self::Qwen3Moe(m) => Ok((
+                m.args.num_key_value_heads,
+                m.args
+                    .head_dim
+                    .unwrap_or_else(|| m.args.hidden_size / m.args.num_attention_heads),
+            )),
+            Self::Qwen3Next(m) => Ok((m.args.num_key_value_heads, m.args.head_dim)),
+            Self::Gemma2(m) => Ok((m.args.num_key_value_heads, m.args.head_dim)),
+            Self::Phi3(m) => Ok((
+                m.args.num_key_value_heads,
+                checked_head_dim(m.args.hidden_size, m.args.num_attention_heads)?,
+            )),
+            Self::Starcoder2(m) => Ok((
+                m.args.num_key_value_heads,
+                checked_head_dim(m.args.hidden_size, m.args.num_attention_heads)?,
+            )),
+            Self::LlavaQwen2(m) => Ok((
+                m.num_key_value_heads(),
+                m.head_dim()
+                    .map_err(|err| Exception::custom(err.to_string()))?,
+            )),
+            Self::DeepSeekV2(m) => Ok((
+                m.args.num_key_value_heads,
+                m.args.qk_nope_head_dim + m.args.qk_rope_head_dim,
+            )),
         }
+    }
+
+    pub fn make_cache(&self) -> Result<AnyCache, Exception> {
+        // Default to dense KV storage when no explicit config is provided.
+        self.make_cache_with_config(KvCacheConfig::default())
     }
 
     pub fn make_cache_with_config(
@@ -1348,7 +1382,7 @@ mod tests {
     fn any_model_qwen3_moe_make_cache_returns_kv() {
         let model = qwen3_moe::Qwen3MoeCausalLM::new(small_qwen3_moe_args()).unwrap();
         let any = AnyModel::Qwen3Moe(model);
-        let cache = any.make_cache();
+        let cache = any.make_cache().unwrap();
         match &cache {
             AnyCache::KV(layers) => assert_eq!(layers.len(), 2),
             AnyCache::Hybrid(_) => panic!("Expected KV cache for Qwen3Moe"),
@@ -1395,7 +1429,7 @@ mod tests {
     fn any_model_qwen3_moe_forward_dispatches_to_kv_cache() {
         let model = qwen3_moe::Qwen3MoeCausalLM::new(small_qwen3_moe_args()).unwrap();
         let mut any = AnyModel::Qwen3Moe(model);
-        let mut cache = any.make_cache();
+        let mut cache = any.make_cache().unwrap();
         let input = Array::from_slice(&[1_i32, 2, 3], &[1, 3]);
         // Forward dispatches correctly (Qwen3Moe + KV cache), but returns
         // Err because unloaded QLinear weights are float32 placeholders.

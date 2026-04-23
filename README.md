@@ -94,6 +94,18 @@ Each profile gets isolated runtime files (`higgs.<profile>.pid`, `higgs.<profile
 | `--rate-limit` | `HIGGS_RATE_LIMIT` | `0` | Requests/min per client |
 | `--timeout` | `HIGGS_TIMEOUT` | `300` | Request timeout (seconds) |
 | `--batch` | -- | `false` | Enable continuous batching |
+| `--kv-cache` | -- | `off` | KV cache mode: `off` or `turboquant` |
+| `--kv-bits` | -- | `3` | Default TurboQuant KV bit width |
+| `--kv-key-bits` | -- | `kv-bits - 1` | Override TurboQuant key bit width |
+| `--kv-value-bits` | -- | `kv-bits` | Override TurboQuant value bit width |
+| `--kv-no-norm-correction` | -- | `false` | Disable TurboQuant norm correction |
+| `--kv-adaptive-dense-layers` | -- | `0` | Keep the last N KV cache layers dense |
+| `--kv-seed` | -- | `0` | TurboQuant seed |
+
+Additional simple-mode env toggles:
+- `HIGGS_ENABLE_THINKING=0|1` forces Qwen thinking on or off.
+- `HIGGS_CHUNKED_PREFILL_THRESHOLD` enables chunked prefill above a token threshold.
+- `HIGGS_CHUNKED_PREFILL_CHUNK_SIZE` controls the chunk size used during chunked prefill.
 
 ### Gateway mode (config file)
 
@@ -112,6 +124,13 @@ port = 8000
 path = "mlx-community/Llama-3.2-1B-Instruct-4bit"
 # name = "llama"     # optional friendly name (used as engine key and for auto_router lookup)
 # batch = false
+# kv_cache = "turboquant"
+# kv_bits = 3
+# kv_key_bits = 2
+# kv_value_bits = 3
+# kv_norm_correction = true
+# kv_adaptive_dense_layers = 0
+# kv_seed = 0
 
 # --- Remote providers ---
 [provider.anthropic]

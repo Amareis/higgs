@@ -661,12 +661,18 @@ fn prefill_request(
             if suffix.is_empty() {
                 // Exact prefix match. Currently falls back to full prefill
                 // because we don't store logits alongside the cache.
-                (req.prompt_tokens.clone(), model.make_cache())
+                (
+                    req.prompt_tokens.clone(),
+                    model.make_cache().map_err(EngineError::Mlx)?,
+                )
             } else {
                 (suffix.to_vec(), matched.cache)
             }
         } else {
-            (req.prompt_tokens.clone(), model.make_cache())
+            (
+                req.prompt_tokens.clone(),
+                model.make_cache().map_err(EngineError::Mlx)?,
+            )
         };
 
         let prompt_array = Array::from(actual_tokens.as_slice()).index(NewAxis);

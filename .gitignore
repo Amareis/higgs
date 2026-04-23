@@ -11,10 +11,8 @@ bench/
 .gitnexus
 .venv/
 .pytest_cache/
-*.*/__pycache__/
+**/__pycache__/
 .claude/
 .planning/
-benchmarks/
 benchmarks/*.txt
 benchmarks/*.safetensors
-benchmarks/__pycache__/

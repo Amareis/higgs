@@ -33,6 +33,8 @@ use crate::{
 
 /// Default maximum number of cached prefixes.
 const DEFAULT_PREFIX_CACHE_SIZE: usize = 8;
+const DEFAULT_PAGED_KV_BLOCK_SIZE: usize = 64;
+const PAGED_KV_TARGET_BYTES: usize = 512 * 1024 * 1024;
 
 /// Acquire a `Mutex` lock, recovering from poison by reusing the inner data.
 /// Used in this crate to keep session-management methods infallible while
@@ -97,6 +99,16 @@ fn clear_cache_after_prefill_enabled() -> bool {
                 .as_deref(),
         )
     })
+}
+
+fn estimate_paged_kv_blocks(num_kv_heads: usize, head_dim: usize, block_size: usize) -> usize {
+    let bytes_per_token = num_kv_heads
+        .saturating_mul(head_dim)
+        .saturating_mul(2)
+        .saturating_mul(std::mem::size_of::<half::f16>())
+        .max(1);
+    let bytes_per_block = bytes_per_token.saturating_mul(block_size).max(1);
+    (PAGED_KV_TARGET_BYTES / bytes_per_block).clamp(256, 4096)
 }
 
 #[allow(unsafe_code)]
@@ -206,8 +218,6 @@ pub struct SimpleEngine {
     scheduler: Mutex<RoundRobinScheduler>,
     /// Active sessions
     sessions: Mutex<std::collections::HashMap<u64, Session>>,
-    /// Next session ID
-    next_session_id: Mutex<u64>,
     tokenizer: Tokenizer,
     template: Option<ChatTemplateRenderer>,
     model_name: String,
@@ -327,13 +337,21 @@ impl SimpleEngine {
             "Engine ready"
         );
 
-        // Paged KV cache: 4096 blocks × 64 tokens/block = 262k tokens capacity
-        // Adjust based on model size and expected context lengths
+        let (raw_num_kv_heads, raw_head_dim) = model
+            .kv_cache_geometry()
+            .map_err(|e| EngineError::Generation(format!("paged cache geometry: {e}")))?;
+        let num_kv_heads = usize::try_from(raw_num_kv_heads)
+            .map_err(|_| EngineError::Generation("paged cache num_kv_heads overflow".to_owned()))?;
+        let head_dim = usize::try_from(raw_head_dim)
+            .map_err(|_| EngineError::Generation("paged cache head_dim overflow".to_owned()))?;
+        let num_blocks =
+            estimate_paged_kv_blocks(num_kv_heads, head_dim, DEFAULT_PAGED_KV_BLOCK_SIZE);
+
         let paged_cache = PagedKvCache::new(
-            4096, // num_blocks
-            64,   // block_size (tokens per block)
-            2,    // num_kv_heads (Qwen3.5-35B-A3B uses GQA with 2 KV heads)
-            256,  // head_dim (Qwen3.5-35B-A3B)
+            num_blocks,
+            DEFAULT_PAGED_KV_BLOCK_SIZE,
+            num_kv_heads,
+            head_dim,
         )
         .map_err(|e| EngineError::Generation(format!("paged cache init: {e}")))?;
 
@@ -346,7 +364,6 @@ impl SimpleEngine {
             paged_cache: Mutex::new(paged_cache),
             scheduler: Mutex::new(RoundRobinScheduler::new()),
             sessions: Mutex::new(std::collections::HashMap::new()),
-            next_session_id: Mutex::new(1),
             tokenizer,
             template,
             model_name,
@@ -736,34 +753,12 @@ impl SimpleEngine {
     /// Returns the session ID.
     pub fn create_session(
         &self,
-        prompt_tokens: &[u32],
-        max_tokens: usize,
+        _prompt_tokens: &[u32],
+        _max_tokens: usize,
     ) -> Result<u64, EngineError> {
-        let mut next_id = lock_or_recover(&self.next_session_id);
-        let mut scheduler = lock_or_recover(&self.scheduler);
-        let mut sessions = lock_or_recover(&self.sessions);
-        let mut paged_cache = lock_or_recover(&self.paged_cache);
-
-        let session_id = *next_id;
-        *next_id += 1;
-
-        // Create session in paged cache
-        paged_cache
-            .create_session(session_id)
-            .map_err(|e| EngineError::Generation(format!("Failed to create session: {e}")))?;
-
-        // Create session state
-        let session = Session {
-            id: session_id,
-            tokens: prompt_tokens.to_vec(),
-            finished: false,
-            max_tokens,
-        };
-
-        sessions.insert(session_id, session);
-        scheduler.add(session_id);
-
-        Ok(session_id)
+        Err(EngineError::Generation(
+            "session generation is not implemented for SimpleEngine yet".to_owned(),
+        ))
     }
 
     /// Get session state.

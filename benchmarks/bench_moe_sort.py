@@ -148,7 +148,7 @@ def bench(fn, label, *args, **kwargs):
 
 
 def main():
-    print(f"DeepSeek-V2-Lite MoE dispatch profiling")
+    print("DeepSeek-V2-Lite MoE dispatch profiling")
     print(f"  {NUM_EXPERTS} experts, top_k={TOP_K}, {BITS}-bit, "
           f"hidden={HIDDEN}, intermediate={INTERMEDIATE}")
     print(f"  {WARMUP} warmup, {ITERS} iters, reporting median\n")
@@ -182,7 +182,7 @@ def main():
               f"{t_global*1000:>11.2f} ms | {speedup:>8.2f}x")
 
     # Also time just the sort overhead
-    print(f"\n--- Sort overhead alone ---")
+    print("\n--- Sort overhead alone ---")
     for L in [128, 512, 2048]:
         x, indices = make_inputs(1, L)
         x_exp = x.reshape(1, L, 1, 1, HIDDEN)

@@ -823,7 +823,11 @@ impl Gemma2CausalLM {
 
         // Final logit soft-capping
         if let Some(cap) = self.args.final_logit_softcapping {
-            if self.cached_final_inv_cap.is_none() {
+            let needs_refresh = self
+                .cached_final_inv_cap
+                .as_ref()
+                .is_none_or(|cached| cached.dtype() != logits.dtype());
+            if needs_refresh {
                 self.cached_final_inv_cap = Some(array!(1.0 / cap).as_dtype(logits.dtype())?);
                 self.cached_final_cap = Some(array!(cap).as_dtype(logits.dtype())?);
             }

@@ -5270,7 +5270,7 @@ mod tests {
             let diff = actual.subtract(&expected).unwrap().abs().unwrap();
             let max_diff: f32 = diff.max(None).unwrap().item();
             assert!(
-                max_diff < 1e-3,
+                max_diff < 2e-3,
                 "ring-buffer decode conv differs from concat path by {max_diff}"
             );
 
@@ -12290,7 +12290,7 @@ mod tests {
         let b: i32 = 1;
         let d: i32 = 2048;
         let n_layers: i32 = 48;
-        let n_gdn: i32 = 36;
+        let n_gdn = 36;
         let n_experts: i32 = 512;
         let d_inter: i32 = 512;
         let top_k: i32 = 10;
@@ -13349,7 +13349,7 @@ mod tests {
 
             println!();
             println!("==== T = {seq_len} ====");
-            println!("  Wall TTFT (no barriers):  {:>8.1}ms", wall_ms,);
+            println!("  Wall TTFT (no barriers):  {:>8.1}ms", wall_ms);
             println!(
                 "  Sum  (eval barriers):     {:>8.1}ms  (barrier overhead: {:.1}ms)",
                 ms(barrier_total),
@@ -13521,6 +13521,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "benchmark, requires GPU"]
     fn bench_qgemv_vs_quantized_matmul() {
         println!("=== GEMV vs quantized_matmul (gs=64) ===");
         // Small

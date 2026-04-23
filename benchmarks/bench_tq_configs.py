@@ -40,7 +40,12 @@ def start_server(model_path, port, extra_args=None):
     if extra_args:
         cmd += extra_args
     env = {**os.environ, "HIGGS_ENABLE_THINKING": "0", "HIGGS_NO_CONFIG": "1"}
-    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(
+        cmd,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     for _ in range(90):
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=2)
@@ -48,6 +53,7 @@ def start_server(model_path, port, extra_args=None):
         except Exception:
             time.sleep(1)
     proc.kill()
+    proc.wait(timeout=5)
     raise RuntimeError(f"Server on port {port} failed to start")
 
 

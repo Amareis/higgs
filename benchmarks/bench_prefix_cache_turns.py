@@ -153,7 +153,7 @@ def bench_model(model_dir, label):
     env = {**os.environ, "HIGGS_ENABLE_THINKING": "0"}
     proc = subprocess.Popen(
         [HIGGS, "serve", "--model", model_dir, "--port", "8080"],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         preexec_fn=os.setsid,
     )
 

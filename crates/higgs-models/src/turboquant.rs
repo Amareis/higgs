@@ -56,6 +56,7 @@ pub struct KvCacheConfig {
     /// Number of final layers that stay dense (0 = all TQ).
     #[serde(default)]
     pub adaptive_dense_layers: u8,
+    /// Deterministic seed for `TurboQuant` projection state.
     #[serde(default)]
     pub seed: u64,
 }
@@ -1050,6 +1051,8 @@ for (int j = 0; j < D; ++j) {
   auto word_index = bit_index / 32;
   auto shift = bit_index % 32;
   uint code = code_ptr[word_index] >> shift;
+  // head_dim is validated as power-of-two and KBits is in [1, 4], so a straddling
+  // read may only reach the next packed word.
   if (shift + KBits > 32) {
     code |= code_ptr[word_index + 1] << (32 - shift);
   }
@@ -1765,7 +1768,7 @@ mod tests {
             gpu_packed.eval().unwrap();
             let gpu_data = gpu_packed.as_slice::<u32>();
 
-            assert_eq!(gpu_data, &cpu_words[..], "GPU pack mismatch for {bits}-bit",);
+            assert_eq!(gpu_data, &cpu_words[..], "GPU pack mismatch for {bits}-bit");
         }
     }
 

@@ -827,6 +827,9 @@ impl DeepSeekV2CausalLM {
         self.model.norm.forward(&h)
     }
 
+    /// Run the model and return logits for the last position only (`[B, 1, vocab]`).
+    ///
+    /// Use [`Self::forward_hidden`] if the caller needs full-sequence hidden states.
     #[allow(non_snake_case)]
     pub fn forward(
         &mut self,

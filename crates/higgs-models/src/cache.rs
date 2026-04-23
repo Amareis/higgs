@@ -918,7 +918,7 @@ impl TurboQuantStorage {
 
 impl KeyValueCache for SteppingKeyValueCache {
     fn is_quantized(&self) -> bool {
-        self.is_turbo_active()
+        self.config.is_turboquant()
     }
 
     fn bits(&self) -> Option<i32> {

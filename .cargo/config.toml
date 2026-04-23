@@ -1,0 +1,4 @@
+[env]
+# MLX/Metal-backed tests in higgs-engine are not safe under Rust's default
+# parallel test runner on Apple Silicon.
+RUST_TEST_THREADS = "1"
