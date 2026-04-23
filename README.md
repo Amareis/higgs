@@ -106,6 +106,8 @@ Additional simple-mode env toggles:
 - `HIGGS_ENABLE_THINKING=0|1` forces Qwen thinking on or off.
 - `HIGGS_CHUNKED_PREFILL_THRESHOLD` enables chunked prefill above a token threshold.
 - `HIGGS_CHUNKED_PREFILL_CHUNK_SIZE` controls the chunk size used during chunked prefill.
+- `HIGGS_MTP=1` enables Qwen3 speculative MTP only when conditions allow.
+- Qwen thinking budget is currently fixed at 256 tokens and not currently configurable.
 
 ### Gateway mode (config file)
 

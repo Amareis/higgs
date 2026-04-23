@@ -292,11 +292,21 @@ mod tests {
         let area = Rect::new(0, 0, 100, 8);
 
         let default_cols = bottom_panel_columns(area, 50);
-        assert_eq!(default_cols[0].width, 50);
-        assert_eq!(default_cols[1].width, 50);
+        match default_cols.as_ref() {
+            [default_left, default_right] => {
+                assert_eq!(default_left.width, 50);
+                assert_eq!(default_right.width, 50);
+            }
+            _ => panic!("bottom panel columns should produce exactly two columns"),
+        }
 
         let wide_models_cols = bottom_panel_columns(area, 65);
-        assert_eq!(wide_models_cols[0].width, 65);
-        assert_eq!(wide_models_cols[1].width, 35);
+        match wide_models_cols.as_ref() {
+            [wide_left, wide_right] => {
+                assert_eq!(wide_left.width, 65);
+                assert_eq!(wide_right.width, 35);
+            }
+            _ => panic!("bottom panel columns should produce exactly two columns"),
+        }
     }
 }

@@ -326,7 +326,12 @@ def stream_chat(port, messages, max_tokens=MAX_TOKENS, model_name="test",
 
     ttft_s = first_token_time - t0
     decode_s = end - first_token_time
-    n_completion = completion_tokens or len(tokens)
+    completion_tokens_estimated = False
+    if completion_tokens == 0:
+        output_chars = sum(len(chunk) for chunk in tokens)
+        completion_tokens = max(1, int(output_chars / 3.5)) if output_chars else 0
+        completion_tokens_estimated = output_chars > 0
+    n_completion = completion_tokens
     decode_tps = max(n_completion - 1, 0) / decode_s if decode_s > 0.001 else 0
 
     # Estimate prompt tokens if server didn't report (oMLX SSE doesn't)
@@ -339,6 +344,7 @@ def stream_chat(port, messages, max_tokens=MAX_TOKENS, model_name="test",
         "decode_tps": decode_tps,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": n_completion,
+        "completion_tokens_estimated": completion_tokens_estimated,
         "total_ms": (end - t0) * 1000,
         "output": "".join(tokens),
         "rss_mb": get_rss_mb(),
@@ -352,7 +358,9 @@ def fmt_result(r):
         f"TTFT={r['ttft_ms']:>7.0f}ms  "
         f"decode={r['decode_tps']:>5.1f}tok/s  "
         f"prompt={r['prompt_tokens']:>4d}tok  "
-        f"gen={r['completion_tokens']:>3d}tok  "
+        f"gen={r['completion_tokens']:>3d}tok"
+        + ("~" if r.get("completion_tokens_estimated") else "")
+        + "  "
         f"total={r['total_ms']/1000:>5.1f}s  "
         f"RSS={r['rss_mb']:>5.0f}MB"
     )

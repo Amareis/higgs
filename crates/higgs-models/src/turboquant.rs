@@ -56,6 +56,9 @@ pub struct KvCacheConfig {
     #[serde(default)]
     pub adaptive_dense_layers: u8,
     /// Deterministic seed for `TurboQuant` projection state.
+    ///
+    /// A value of `0` disables projection signs (all-ones mask), matching the
+    /// historical default behavior when this field is omitted from config.
     #[serde(default)]
     pub seed: u64,
 }
@@ -407,6 +410,9 @@ impl TurboQuantContext {
         let indices = argmin_axis!(&distances, -1)?;
 
         // Norm correction on CPU batch path
+        raw_norms.eval()?;
+        let raw_norms_flat = raw_norms.as_slice::<f32>().to_vec();
+
         let norms = if self.config.norm_correction {
             let indices_i32 = indices.as_dtype(Dtype::Int32)?;
             let gathered = centroids.take(&indices_i32)?;
@@ -420,9 +426,8 @@ impl TurboQuantContext {
         // Pack on CPU: eval indices, read as flat u32, pack into bytes
         indices.eval()?;
         norms.eval()?;
-
         let indices_flat = indices.as_slice::<u32>();
-        let norms_flat = norms.as_slice::<f32>();
+        let mut norms_flat = norms.as_slice::<f32>().to_vec();
         let h_usize = usize::try_from(h)
             .map_err(|_| Exception::custom("quantize_values_batch: h is negative"))?;
         let t_usize = usize::try_from(t)
@@ -437,6 +442,16 @@ impl TurboQuantContext {
 
         let mut packed = vec![0_u8; ht * code_bytes];
         for (row, packed_row) in packed.chunks_exact_mut(code_bytes).enumerate() {
+            if raw_norms_flat
+                .get(row)
+                .copied()
+                .is_none_or(|norm| norm <= f32::EPSILON)
+            {
+                packed_row.fill(0);
+                norms_flat[row] = 0.0;
+                continue;
+            }
+
             let row_start = row * dim;
             let row_end = row_start + dim;
             let row_indices = indices_flat.get(row_start..row_end).ok_or_else(|| {
@@ -446,7 +461,7 @@ impl TurboQuantContext {
         }
 
         Ok(BatchQuantizedValues {
-            norms: norms_flat.to_vec(),
+            norms: norms_flat,
             packed_codes: packed,
             code_bytes,
         })

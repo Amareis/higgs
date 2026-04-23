@@ -55,6 +55,7 @@ static CHUNKED_PREFILL_THRESHOLD: OnceLock<i32> = OnceLock::new();
 /// Number of tokens per chunk during chunked prefill.
 static CHUNKED_PREFILL_CHUNK_SIZE: OnceLock<i32> = OnceLock::new();
 static CLEAR_CACHE_AFTER_PREFILL: OnceLock<bool> = OnceLock::new();
+static HIGGS_MTP_ENABLED: OnceLock<bool> = OnceLock::new();
 
 fn parse_positive_chunked_prefill_value(raw: Option<&str>, default: i32) -> i32 {
     raw.and_then(|s| s.parse::<i32>().ok())
@@ -62,11 +63,18 @@ fn parse_positive_chunked_prefill_value(raw: Option<&str>, default: i32) -> i32 
         .unwrap_or(default)
 }
 
-fn parse_enabled_flag(raw: Option<&str>) -> bool {
-    matches!(
-        raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
-        Some("1" | "true" | "on" | "yes")
-    )
+fn parse_enabled_flag(raw: Option<&str>) -> Option<bool> {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("1" | "true" | "on" | "yes") => Some(true),
+        Some("0" | "false" | "off" | "no") => Some(false),
+        _ => None,
+    }
+}
+
+fn mtp_enabled() -> bool {
+    *HIGGS_MTP_ENABLED.get_or_init(|| {
+        parse_enabled_flag(std::env::var("HIGGS_MTP").ok().as_deref()).unwrap_or(false)
+    })
 }
 
 fn chunked_prefill_threshold() -> i32 {
@@ -98,6 +106,7 @@ fn clear_cache_after_prefill_enabled() -> bool {
                 .ok()
                 .as_deref(),
         )
+        .unwrap_or(false)
     })
 }
 
@@ -271,12 +280,17 @@ impl SimpleEngine {
         let eos_token_ids = extract_eos_tokens(model_dir);
 
         // Auto-detect thinking mode: Qwen3.5 models support <think> tags.
-        // Override with HIGGS_ENABLE_THINKING=0 or HIGGS_ENABLE_THINKING=1.
-        let mut enable_thinking = match std::env::var("HIGGS_ENABLE_THINKING").ok().as_deref() {
-            Some("0" | "false") => false,
-            Some("1" | "true") => true,
-            _ => detect_thinking_support(model_dir),
-        };
+        // Override with HIGGS_ENABLE_THINKING=0/1, off/true, yes/no etc.
+        let mut enable_thinking = std::env::var("HIGGS_ENABLE_THINKING")
+            .ok()
+            .as_deref()
+            .map_or_else(
+                || detect_thinking_support(model_dir),
+                |v| {
+                    parse_enabled_flag(Some(v))
+                        .unwrap_or_else(|| detect_thinking_support(model_dir))
+                },
+            );
 
         // Resolve </think> token ID from the tokenizer. If the tokenizer
         // doesn't know this token, disable thinking to avoid injecting
@@ -971,10 +985,10 @@ impl SimpleEngine {
             });
         }
 
-        // MTP speculative decode: gated behind HIGGS_MTP=1 env var.
+        // MTP speculative decode: gated behind HIGGS_MTP env var.
         // Only for greedy (temperature == 0), no constraints, no logprobs.
         #[allow(clippy::float_cmp)]
-        if std::env::var("HIGGS_MTP").is_ok_and(|v| v == "1")
+        if mtp_enabled()
             && prepared.model.has_mtp()
             && constraint.is_none()
             && !logprobs
@@ -1308,11 +1322,78 @@ impl SimpleEngine {
                             thinking_tokens += 1;
                             if thinking_tokens >= THINKING_BUDGET {
                                 tokens.push(close_id);
+                                accepted += 1;
                                 seen_think_close = true;
                                 tracing::info!(
                                     budget = THINKING_BUDGET,
                                     "MTP: thinking budget reached, forcing </think>"
                                 );
+                                if self.eos_token_ids.contains(&close_id) {
+                                    let elapsed = t_start.elapsed();
+                                    tracing::info!(
+                                        tokens = accepted,
+                                        cycles = total_cycles,
+                                        accept_rate = format!(
+                                            "{:.1}%",
+                                            (f64::from(accepted) / f64::from(total_cycles) - 1.0)
+                                                * 100.0
+                                        ),
+                                        tok_per_s = format!(
+                                            "{:.1}",
+                                            f64::from(accepted) / elapsed.as_secs_f64()
+                                        ),
+                                        "MTP decode complete"
+                                    );
+                                    return Ok(GenerationOutput {
+                                        text: self.decode_tokens(tokens)?,
+                                        finish_reason: "stop".to_owned(),
+                                        prompt_tokens: prompt_len,
+                                        completion_tokens: Self::completion_len(tokens)?,
+                                        token_logprobs: None,
+                                    });
+                                }
+
+                                if has_stop_sequences {
+                                    let text = self.decode_tokens(tokens)?;
+                                    if let Some(truncated) =
+                                        check_stop_sequences(&text, stop_sequences)
+                                    {
+                                        return Ok(GenerationOutput {
+                                            text: truncated,
+                                            finish_reason: "stop".to_owned(),
+                                            prompt_tokens: prompt_len,
+                                            completion_tokens: Self::completion_len(tokens)?,
+                                            token_logprobs: None,
+                                        });
+                                    }
+                                }
+
+                                let completion_len = Self::completion_len(tokens)?;
+                                if completion_len >= max_tokens {
+                                    let elapsed = t_start.elapsed();
+                                    tracing::info!(
+                                        tokens = accepted,
+                                        cycles = total_cycles,
+                                        accept_rate = format!(
+                                            "{:.1}%",
+                                            (f64::from(accepted) / f64::from(total_cycles) - 1.0)
+                                                * 100.0
+                                        ),
+                                        tok_per_s = format!(
+                                            "{:.1}",
+                                            f64::from(accepted) / elapsed.as_secs_f64()
+                                        ),
+                                        "MTP decode complete (length limit)"
+                                    );
+                                    return Ok(GenerationOutput {
+                                        text: self.decode_tokens(tokens)?,
+                                        finish_reason: "length".to_owned(),
+                                        prompt_tokens: prompt_len,
+                                        completion_tokens: completion_len,
+                                        token_logprobs: None,
+                                    });
+                                }
+
                                 // Skip remaining tokens from this cycle
                                 break;
                             }
@@ -1460,11 +1541,92 @@ impl SimpleEngine {
                             thinking_tokens += 1;
                             if thinking_tokens >= THINKING_BUDGET {
                                 tokens.push(close_id);
+                                accepted += 1;
                                 seen_think_close = true;
                                 tracing::info!(
                                     budget = THINKING_BUDGET,
                                     "MTP streaming: thinking budget reached, forcing </think>"
                                 );
+
+                                let is_eos = self.eos_token_ids.contains(&close_id);
+                                let completion_len = Self::completion_len(tokens)?;
+                                let is_max = completion_len >= max_tokens;
+
+                                let full_text = self.decode_tokens(tokens)?;
+                                let (final_new_text, hit_stop_seq) = if has_stop_sequences {
+                                    check_stop_sequences(&full_text, stop_sequences).map_or_else(
+                                        || {
+                                            (
+                                                full_text
+                                                    .get(prev_decoded_len..)
+                                                    .unwrap_or_default()
+                                                    .to_owned(),
+                                                false,
+                                            )
+                                        },
+                                        |truncated| {
+                                            let emit = truncated
+                                                .get(prev_decoded_len..)
+                                                .unwrap_or_default()
+                                                .to_owned();
+                                            (emit, true)
+                                        },
+                                    )
+                                } else {
+                                    (
+                                        full_text
+                                            .get(prev_decoded_len..)
+                                            .unwrap_or_default()
+                                            .to_owned(),
+                                        false,
+                                    )
+                                };
+                                let step_finished = is_eos || is_max || hit_stop_seq;
+                                let finish_reason = if is_eos || hit_stop_seq {
+                                    Some("stop".to_owned())
+                                } else if is_max {
+                                    Some("length".to_owned())
+                                } else {
+                                    None
+                                };
+                                prev_decoded_len = full_text.len();
+
+                                if step_finished {
+                                    let elapsed = t_start.elapsed();
+                                    tracing::info!(
+                                        tokens = accepted,
+                                        cycles = total_cycles,
+                                        accept_rate = format!(
+                                            "{:.1}%",
+                                            (f64::from(accepted) / f64::from(total_cycles) - 1.0)
+                                                * 100.0
+                                        ),
+                                        tok_per_s = format!(
+                                            "{:.1}",
+                                            f64::from(accepted) / elapsed.as_secs_f64()
+                                        ),
+                                        "MTP streaming decode complete"
+                                    );
+                                }
+
+                                if sender
+                                    .blocking_send(StreamingOutput {
+                                        new_text: final_new_text,
+                                        finished: step_finished,
+                                        finish_reason,
+                                        prompt_tokens: prompt_len,
+                                        completion_tokens: completion_len,
+                                        token_logprob: None,
+                                    })
+                                    .is_err()
+                                {
+                                    return Ok(());
+                                }
+
+                                if step_finished {
+                                    return Ok(());
+                                }
+
                                 break;
                             }
                         }
@@ -1710,7 +1872,7 @@ impl SimpleEngine {
 
         // MTP speculative decode (streaming): greedy, no constraints, no logprobs.
         #[allow(clippy::float_cmp)]
-        if std::env::var("HIGGS_MTP").is_ok_and(|v| v == "1")
+        if mtp_enabled()
             && prepared.model.has_mtp()
             && constraint.is_none()
             && !logprobs
@@ -2285,13 +2447,15 @@ mod tests {
 
     #[test]
     fn test_parse_enabled_flag_accepts_common_truthy_values() {
-        assert!(parse_enabled_flag(Some("1")));
-        assert!(parse_enabled_flag(Some("true")));
-        assert!(parse_enabled_flag(Some("On")));
-        assert!(parse_enabled_flag(Some("yes")));
-        assert!(!parse_enabled_flag(None));
-        assert!(!parse_enabled_flag(Some("0")));
-        assert!(!parse_enabled_flag(Some("false")));
-        assert!(!parse_enabled_flag(Some("unexpected")));
+        assert_eq!(parse_enabled_flag(Some("1")), Some(true));
+        assert_eq!(parse_enabled_flag(Some("true")), Some(true));
+        assert_eq!(parse_enabled_flag(Some("On")), Some(true));
+        assert_eq!(parse_enabled_flag(Some("yes")), Some(true));
+        assert_eq!(parse_enabled_flag(None), None);
+        assert_eq!(parse_enabled_flag(Some("0")), Some(false));
+        assert_eq!(parse_enabled_flag(Some("false")), Some(false));
+        assert_eq!(parse_enabled_flag(Some("off")), Some(false));
+        assert_eq!(parse_enabled_flag(Some("no")), Some(false));
+        assert_eq!(parse_enabled_flag(Some("unexpected")), None);
     }
 }
