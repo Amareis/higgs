@@ -7,9 +7,13 @@ use half::f16;
 /// Layout specification for KV cache.
 #[derive(Debug, Clone)]
 pub struct KvCacheLayout {
+    /// Total number of allocatable cache blocks.
     pub num_blocks: usize,
+    /// Number of token slots stored in each block.
     pub block_size: usize,
+    /// Number of key/value heads stored per token.
     pub num_kv_heads: usize,
+    /// Per-head embedding dimension.
     pub head_dim: usize,
 }
 

@@ -10,6 +10,10 @@ use mlx_rs::{Array, argmax_axis, ops::indexing::IndexOp, transforms::eval};
 
 use crate::error::EngineError;
 
+const fn draft_matches_target(draft_token_id: u32, target_id: u32) -> bool {
+    draft_token_id == target_id
+}
+
 /// Result of a single MTP speculative decode cycle.
 pub struct MtpCycleResult {
     /// Token IDs accepted this cycle (1 or 2).
@@ -56,7 +60,7 @@ pub fn mtp_cycle(
     eval([&target_arr, &h_confirmed]).map_err(EngineError::Mlx)?;
     let target_id: u32 = target_arr.item();
 
-    if target_id == draft_token_id {
+    if draft_matches_target(draft_token_id, target_id) {
         // ACCEPT: draft matches backbone prediction.
         // Keep the MTP cache aligned with the newly accepted draft token too.
         model
@@ -90,5 +94,20 @@ pub fn mtp_cycle(
             hidden: h_confirmed,
             next_token_id: target_id,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::draft_matches_target;
+
+    #[test]
+    fn draft_match_helper_accepts_identical_tokens() {
+        assert!(draft_matches_target(17, 17));
+    }
+
+    #[test]
+    fn draft_match_helper_rejects_different_tokens() {
+        assert!(!draft_matches_target(17, 18));
     }
 }

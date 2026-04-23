@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -125,6 +126,25 @@ def kill_by_port(port):
         pass  # no process on port
 
 
+def port_is_open(port):
+    """Return True when a local TCP port accepts connections."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def wait_for_port_closed(port, timeout=10):
+    """Poll until a local TCP port stops accepting connections."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not port_is_open(port):
+            return True
+        time.sleep(0.2)
+    return not port_is_open(port)
+
+
 def kill_server():
     global server_proc
     if server_proc:
@@ -143,7 +163,7 @@ def kill_server():
     # Kill any stray servers on our ports (catches leaked processes)
     for port in (HIGGS_PORT, OMLX_PORT):
         kill_by_port(port)
-    time.sleep(COOLDOWN)
+        wait_for_port_closed(port, timeout=COOLDOWN)
 
 
 def wait_for_server(port, api_key=None, timeout=180):
@@ -171,7 +191,7 @@ def start_higgs(model_path, expected_name=None):
     global server_proc
     # Kill anything still on the port before starting
     kill_by_port(HIGGS_PORT)
-    time.sleep(1)
+    wait_for_port_closed(HIGGS_PORT)
     env = {**os.environ, "HIGGS_ENABLE_THINKING": "0"}
     server_proc = subprocess.Popen(
         [HIGGS_BIN, "serve", "--model", model_path, "--port", str(HIGGS_PORT)],
@@ -197,7 +217,7 @@ def start_omlx(model_parent_dir, expected_name=None):
     global server_proc
     # Kill anything still on the port before starting
     kill_by_port(OMLX_PORT)
-    time.sleep(1)
+    wait_for_port_closed(OMLX_PORT)
     server_proc = subprocess.Popen(
         [
             OMLX_CLI, "serve",
@@ -398,59 +418,59 @@ def run_for_backend(backend, model_key, model_info, num_turns, skip_multiturn):
 
     expected = model_info.get("higgs_name", os.path.basename(model_path))
 
-    if backend == "higgs":
-        port = HIGGS_PORT
-        api_key = None
-        log(f"  Starting Higgs on :{port} ...")
-        model_name = start_higgs(model_path, expected_name=expected)
-    else:
-        port = OMLX_PORT
-        api_key = "omlx"
-        log(f"  Starting oMLX on :{port} (--no-cache) ...")
-        model_name = start_omlx(os.path.dirname(model_path), expected_name=expected)
+    try:
+        if backend == "higgs":
+            port = HIGGS_PORT
+            api_key = None
+            log(f"  Starting Higgs on :{port} ...")
+            model_name = start_higgs(model_path, expected_name=expected)
+        else:
+            port = OMLX_PORT
+            api_key = "omlx"
+            log(f"  Starting oMLX on :{port} (--no-cache) ...")
+            model_name = start_omlx(os.path.dirname(model_path), expected_name=expected)
 
-    if not model_name:
-        log("  FAILED to start server")
-        kill_server()
-        return None
+        if not model_name:
+            log("  FAILED to start server")
+            return None
 
-    log(f"  Server ready: model={model_name}  RSS={get_rss_mb():.0f}MB")
+        log(f"  Server ready: model={model_name}  RSS={get_rss_mb():.0f}MB")
 
-    # Use the right model name for requests
-    if backend == "omlx":
-        # oMLX discovers models by directory basename
-        model_name = os.path.basename(model_path)
+        # Use the right model name for requests
+        if backend == "omlx":
+            # oMLX discovers models by directory basename
+            model_name = os.path.basename(model_path)
 
-    # Warmup
-    log("  Warmup...")
-    warmup = stream_chat(
-        port,
-        [{"role": "user", "content": "Say hi."}],
-        max_tokens=WARMUP_TOKENS,
-        model_name=model_name,
-        api_key=api_key,
-    )
-    if "error" in warmup:
-        log(f"  Warmup failed: {warmup['error']}")
-        kill_server()
-        return None
-    log(f"  Warmup done. RSS={get_rss_mb():.0f}MB")
-
-    all_results = {"backend": backend, "model": model_key}
-
-    # Phase 1: Single-turn
-    log(f"\n  [Single-turn]")
-    all_results["single_turn"] = run_single_turn(port, model_name, api_key)
-
-    # Phase 2: Multi-turn
-    if not skip_multiturn:
-        log(f"\n  [Multi-turn, {num_turns} turns]")
-        all_results["multi_turn"] = run_multi_turn(
-            port, model_name, num_turns, api_key
+        # Warmup
+        log("  Warmup...")
+        warmup = stream_chat(
+            port,
+            [{"role": "user", "content": "Say hi."}],
+            max_tokens=WARMUP_TOKENS,
+            model_name=model_name,
+            api_key=api_key,
         )
+        if "error" in warmup:
+            log(f"  Warmup failed: {warmup['error']}")
+            return None
+        log(f"  Warmup done. RSS={get_rss_mb():.0f}MB")
 
-    kill_server()
-    return all_results
+        all_results = {"backend": backend, "model": model_key}
+
+        # Phase 1: Single-turn
+        log(f"\n  [Single-turn]")
+        all_results["single_turn"] = run_single_turn(port, model_name, api_key)
+
+        # Phase 2: Multi-turn
+        if not skip_multiturn:
+            log(f"\n  [Multi-turn, {num_turns} turns]")
+            all_results["multi_turn"] = run_multi_turn(
+                port, model_name, num_turns, api_key
+            )
+
+        return all_results
+    finally:
+        kill_server()
 
 
 def print_comparison(higgs_results, omlx_results, model_label):

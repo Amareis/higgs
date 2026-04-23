@@ -7,9 +7,13 @@ use half::f16;
 /// View into a session's KV cache.
 #[derive(Debug, Clone)]
 pub struct KvCacheView<'a> {
+    /// Session identifier associated with this cache view.
     pub session_id: u64,
+    /// Block IDs currently assigned to the session, in logical order.
     pub blocks: &'a [u32],
+    /// Number of tokens materialized in the session cache.
     pub num_tokens: usize,
+    /// Shared cache geometry used to interpret block and token offsets.
     pub layout: &'a KvCacheLayout,
 }
 
