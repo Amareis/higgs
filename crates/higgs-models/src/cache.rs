@@ -1474,7 +1474,7 @@ mod tests {
     }
 
     /// Regression: `from_turbo_arrays` must propagate the parent context's
-    /// `KvCacheConfig` (key_bits, seed, etc.) instead of hard-coding defaults.
+    /// `KvCacheConfig` (`key_bits`, seed, etc.) instead of hard-coding defaults.
     /// Previously the constructor wrote `KvCacheConfig { mode: Turboquant,
     /// ..default() }`, silently dropping all user-configured fields.
     #[test]

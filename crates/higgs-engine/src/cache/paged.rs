@@ -66,12 +66,12 @@ impl PagedKvCache {
     }
 
     /// Get cache layout.
-    pub fn layout(&self) -> &KvCacheLayout {
+    pub const fn layout(&self) -> &KvCacheLayout {
         self.storage.layout()
     }
 
     /// Get total capacity in tokens.
-    pub fn capacity_tokens(&self) -> usize {
+    pub const fn capacity_tokens(&self) -> usize {
         self.storage.capacity_tokens()
     }
 

@@ -120,7 +120,7 @@ pub struct ServeArgs {
     #[arg(long, value_name = "MODE", value_parser = ["off", "turboquant"])]
     pub kv_cache: Option<String>,
 
-    /// Bit width for TurboQuant KV caches.
+    /// Bit width for `TurboQuant` KV caches.
     #[arg(long)]
     pub kv_bits: Option<u8>,
 
@@ -140,7 +140,7 @@ pub struct ServeArgs {
     #[arg(long)]
     pub kv_adaptive_dense_layers: Option<u8>,
 
-    /// Seed used to generate TurboQuant rotation/QJL matrices.
+    /// Seed used to generate `TurboQuant` rotation/QJL matrices.
     #[arg(long)]
     pub kv_seed: Option<u64>,
 }
@@ -682,8 +682,7 @@ fn ensure_auto_router_model(config: &mut HiggsConfig) {
 
 fn cli_kv_cache_mode(mode: Option<&str>) -> Result<KvCacheMode, String> {
     match mode {
-        None => Ok(KvCacheMode::Off),
-        Some("off") => Ok(KvCacheMode::Off),
+        None | Some("off") => Ok(KvCacheMode::Off),
         Some("turboquant") => Ok(KvCacheMode::Turboquant),
         Some(other) => Err(format!("unknown kv_cache mode '{other}'")),
     }

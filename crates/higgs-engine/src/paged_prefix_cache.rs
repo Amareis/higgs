@@ -52,6 +52,7 @@ struct TqBlock {
 }
 
 /// Per-layer cached data.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum CachedLayerData {
     /// Attention layer: sequence of dense K/V blocks.
@@ -430,6 +431,7 @@ impl PagedPrefixCache {
 // ---------------------------------------------------------------------------
 
 /// Check if any layer in the cache uses `TurboQuant`.
+#[allow(dead_code)]
 fn is_turboquant(cache: &AnyCache) -> bool {
     match cache {
         AnyCache::KV(layers) => layers.iter().any(|l| {
@@ -803,8 +805,7 @@ mod tests {
             AnyCache::KV(layers) => layers
                 .iter()
                 .find_map(|l| l.as_ref())
-                .map(KeyValueCache::offset)
-                .unwrap_or(0),
+                .map_or(0, KeyValueCache::offset),
             AnyCache::Hybrid(layers) => layers
                 .iter()
                 .find_map(|l| match l {
@@ -887,7 +888,7 @@ mod tests {
                     assert_eq!(kv.values().unwrap().shape(), &[1, 2, 96, 8]);
                 }
             }
-            _ => panic!("Expected KV cache"),
+            AnyCache::Hybrid(_) => panic!("Expected KV cache"),
         }
     }
 
@@ -923,7 +924,7 @@ mod tests {
                     }
                 }
             }
-            _ => panic!("Expected Hybrid cache"),
+            AnyCache::KV(_) => panic!("Expected Hybrid cache"),
         }
     }
 

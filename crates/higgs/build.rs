@@ -1,4 +1,4 @@
-use std::{env, fs, path::PathBuf, process};
+use std::{env, fs, path::PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -8,7 +8,6 @@ fn main() {
     if let Err(reason) = copy_metallib() {
         if is_macos {
             println!("cargo:warning=failed to set up mlx.metallib: {reason}");
-            process::exit(1);
         }
     }
 }

@@ -49,6 +49,7 @@ impl RoundRobinScheduler {
     }
 
     /// Get next session ID and rotate to back (round-robin).
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<SessionId> {
         let id = self.q.pop_front()?;
         self.q.push_back(id); // Rotate to back

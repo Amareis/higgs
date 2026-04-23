@@ -20,7 +20,7 @@ impl KvCacheLayout {
     }
 
     /// Calculate total elements in cache.
-    pub fn total_elems(&self) -> usize {
+    pub const fn total_elems(&self) -> usize {
         self.num_blocks * self.block_size * self.elems_per_token()
     }
 }

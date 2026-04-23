@@ -1,3 +1,11 @@
+#![allow(
+    clippy::items_after_statements,
+    clippy::significant_drop_tightening,
+    clippy::too_many_lines,
+    clippy::cast_possible_wrap,
+    clippy::manual_let_else
+)]
+
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -769,7 +777,7 @@ impl SimpleEngine {
     /// Check if session is finished.
     pub fn is_session_finished(&self, session_id: u64) -> bool {
         let sessions = lock_or_recover(&self.sessions);
-        sessions.get(&session_id).map_or(true, |s| s.finished)
+        sessions.get(&session_id).is_none_or(|s| s.finished)
     }
 
     /// Step one token for all active sessions (batched generation).

@@ -1,3 +1,5 @@
+#![allow(clippy::items_after_test_module)]
+
 //! Qwen3-Coder-Next model implementation.
 //!
 //! Hybrid SSM/attention transformer with Mixture of Experts (`MoE`).
@@ -32,7 +34,7 @@ use serde::Deserialize;
 // FFI error capture for gather_qmm
 // ---------------------------------------------------------------------------
 
-/// Per-thread FFI error capture — avoids cross-contamination between threads.
+// Per-thread FFI error capture avoids cross-contamination between threads.
 thread_local! {
     static FFI_LAST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
 }
@@ -132,6 +134,7 @@ pub struct QuantizationConfig {
 /// - `use_separate_gdn_projections` — when `true`, GDN layers use 4 separate
 ///   projection matrices; when `false` (default), projections are fused to 2
 ///   combined matrices for fewer GPU dispatches.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct Qwen3NextModelArgs {
     pub model_type: String,
@@ -317,7 +320,7 @@ impl QEmbedding {
         let s = (*self.scales).take_axis(&flat, 0)?;
         let b = (*self.biases).take_axis(&flat, 0)?;
         let out = ops::dequantize(&w, &s, &b, self.group_size, self.bits)?;
-        let mut ret_shape: Vec<i32> = shape.clone();
+        let mut ret_shape: Vec<i32> = shape;
         ret_shape.push(-1);
         out.reshape(&ret_shape)
     }
@@ -389,9 +392,10 @@ fn should_force_dense_decode_safe_defaults_for_brand(brand: Option<&str>) -> boo
 }
 
 fn compiled_gating_enabled() -> bool {
-    *COMPILED_GATING_ENABLED.get_or_init(|| match std::env::var("HIGGS_COMPILED_GATING") {
-        Ok(raw) => parse_compiled_gating_enabled(Some(raw.as_str())),
-        Err(_) => true,
+    *COMPILED_GATING_ENABLED.get_or_init(|| {
+        std::env::var("HIGGS_COMPILED_GATING")
+            .ok()
+            .is_none_or(|raw| parse_compiled_gating_enabled(Some(raw.as_str())))
     })
 }
 
@@ -1070,12 +1074,16 @@ fn dense_ffn_gemv_mode() -> DenseFfnGemvMode {
 }
 
 fn dense_ffn_fuse_gate_up() -> bool {
-    *DENSE_FFN_FUSE_GATE_UP.get_or_init(|| match std::env::var("HIGGS_DENSE_FFN_GATE_UP") {
-        Ok(raw) => !matches!(
-            Some(raw.trim().to_ascii_lowercase()).as_deref(),
-            Some("separate" | "split" | "0" | "false" | "off")
-        ),
-        Err(_) => !should_force_dense_decode_safe_defaults_for_brand(apple_cpu_brand()),
+    *DENSE_FFN_FUSE_GATE_UP.get_or_init(|| {
+        std::env::var("HIGGS_DENSE_FFN_GATE_UP").ok().map_or_else(
+            || !should_force_dense_decode_safe_defaults_for_brand(apple_cpu_brand()),
+            |raw| {
+                !matches!(
+                    Some(raw.trim().to_ascii_lowercase()).as_deref(),
+                    Some("separate" | "split" | "0" | "false" | "off")
+                )
+            },
+        )
     })
 }
 
@@ -1085,13 +1093,14 @@ fn qgemv_config_cache_enabled() -> bool {
 
 fn gated_delta_config_cache_enabled() -> bool {
     *GATED_DELTA_CONFIG_CACHE_ENABLED.get_or_init(|| {
-        match std::env::var("HIGGS_CACHE_GATED_DELTA_CONFIGS") {
-            Ok(raw) => matches!(
-                Some(raw.trim().to_ascii_lowercase()).as_deref(),
-                Some("1" | "true" | "on" | "yes")
-            ),
-            Err(_) => true,
-        }
+        std::env::var("HIGGS_CACHE_GATED_DELTA_CONFIGS")
+            .ok()
+            .is_none_or(|raw| {
+                matches!(
+                    Some(raw.trim().to_ascii_lowercase()).as_deref(),
+                    Some("1" | "true" | "on" | "yes")
+                )
+            })
     })
 }
 
@@ -1705,6 +1714,7 @@ impl SwitchMlpWeights {
     /// `x`: `[..., D]` input
     /// `indices`: `[..., top_k]` expert indices
     /// Returns: `[..., top_k, D]`
+    #[allow(dead_code)]
     pub(crate) fn forward_gather(
         &self,
         x: &Array,
@@ -2245,7 +2255,7 @@ impl GatedDeltaNet {
         silu_direct(&conv_flat.reshape(&[batch, 1, self.conv_dim])?)
     }
 
-    #[allow(non_snake_case)]
+    #[allow(non_snake_case, clippy::too_many_lines)]
     fn forward(
         &mut self,
         inputs: &Array,
@@ -2861,7 +2871,6 @@ struct Qwen3NextInner {
     layers: Vec<DecoderLayer>,
     #[param]
     norm: nn::RmsNorm,
-    full_attention_interval: i32,
 }
 
 impl Qwen3NextInner {
@@ -2876,7 +2885,6 @@ impl Qwen3NextInner {
             norm: nn::RmsNormBuilder::new(args.hidden_size)
                 .eps(args.rms_norm_eps)
                 .build()?,
-            full_attention_interval: args.full_attention_interval,
         })
     }
 }
@@ -3072,7 +3080,7 @@ impl Qwen3NextCausalLM {
     ///
     /// Used internally by `forward_hidden` (which adds norm) and
     /// `forward_with_hidden` (which needs raw states for MTP).
-    #[allow(non_snake_case)]
+    #[allow(non_snake_case, clippy::too_many_lines)]
     fn forward_raw_hidden(
         &mut self,
         inputs: &Array,
@@ -3102,11 +3110,10 @@ impl Qwen3NextCausalLM {
         let fa_mask: Option<AttentionMask> = if T > 1 {
             let kv_offset = kv_cache
                 .iter()
-                .filter_map(|lc| match lc.as_ref()? {
+                .find_map(|lc| match lc.as_ref()? {
                     LayerCache::KV(kv) => Some(kv.offset()),
-                    _ => None,
+                    LayerCache::Arrays(_) => None,
                 })
-                .next()
                 .unwrap_or(0);
 
             if kv_offset > 0 {
@@ -4008,7 +4015,15 @@ fn load_qwen3_5_moe_weights_fused<M: mlx_rs::module::ModuleParametersExt>(
     clippy::borrow_as_ptr,
     clippy::ref_as_ptr,
     clippy::str_to_string,
-    clippy::if_then_some_else_none
+    clippy::if_then_some_else_none,
+    clippy::ignore_without_reason,
+    clippy::unreadable_literal,
+    clippy::cast_possible_wrap,
+    clippy::useless_conversion,
+    clippy::manual_assert,
+    clippy::option_if_let_else,
+    clippy::used_underscore_binding,
+    clippy::redundant_clone
 )]
 mod tests {
     use super::*;
@@ -12394,7 +12409,7 @@ mod tests {
     ///
     /// cargo test -p higgs-models --release -- bench_async_pipeline --nocapture --ignored
     #[test]
-    #[ignore]
+    #[ignore = "benchmark helper"]
     fn bench_async_pipeline() {
         use mlx_rs::random::normal;
         use mlx_rs::transforms::{async_eval, eval};
@@ -12445,7 +12460,7 @@ mod tests {
     ///
     /// cargo test -p higgs-models --release -- bench_ffi_overhead --nocapture --ignored
     #[test]
-    #[ignore]
+    #[ignore = "benchmark helper"]
     fn bench_ffi_overhead() {
         use mlx_rs::transforms::eval;
 
@@ -13290,7 +13305,7 @@ mod tests {
         println!("--- 27B dense MLP dims ---");
         bench_gemv_at(34816, 5120, 64, 20); // gate+up fused
         bench_gemv_at(5120, 17408, 64, 20); // down projection
-        bench_gemv_at(248320, 5120, 64, 5); // tied lm_head / embedding projection
+        bench_gemv_at(248_320, 5120, 64, 5); // tied lm_head / embedding projection
     }
 
     #[test]
@@ -13630,9 +13645,9 @@ impl Qwen3NextCausalLM {
     ///
     /// This is used after sparse forward pass to get final logits.
     pub fn compute_logits(&self, hidden: &Array) -> Result<Array, Exception> {
-        match self.lm_head.as_ref() {
-            Some(head) => head.forward(hidden),
-            None => self.model.embed_tokens.as_linear(hidden),
-        }
+        self.lm_head.as_ref().map_or_else(
+            || self.model.embed_tokens.as_linear(hidden),
+            |head| head.forward(hidden),
+        )
     }
 }

@@ -179,7 +179,11 @@ pub(crate) fn create_batched_decode_mask(
     clippy::redundant_type_annotations,
     clippy::shadow_unrelated,
     clippy::shadow_reuse,
-    clippy::shadow_same
+    clippy::shadow_same,
+    clippy::suboptimal_flops,
+    clippy::unnecessary_cast,
+    clippy::cast_lossless,
+    clippy::doc_markdown
 )]
 mod tests {
     use super::*;

@@ -46,7 +46,7 @@ pub fn mtp_cycle(
     let draft_token_id: u32 = draft_token_arr.item();
 
     // Step 2: Process confirmed token through backbone
-    let confirmed_input = Array::from_slice(&[confirmed_token_id as i32], &[1, 1]);
+    let confirmed_input = Array::from_slice(&[confirmed_token_id.cast_signed()], &[1, 1]);
     let (confirmed_hidden, confirmed_logits) = model
         .forward_with_hidden(&confirmed_input, None, cache)
         .map_err(EngineError::Mlx)?;
@@ -65,7 +65,7 @@ pub fn mtp_cycle(
             .map_err(EngineError::Mlx)?;
 
         // Process draft token to advance cache and get bonus prediction.
-        let draft_input = Array::from_slice(&[draft_token_id as i32], &[1, 1]);
+        let draft_input = Array::from_slice(&[draft_token_id.cast_signed()], &[1, 1]);
         let (draft_hidden, bonus_logits) = model
             .forward_with_hidden(&draft_input, None, cache)
             .map_err(EngineError::Mlx)?;

@@ -953,13 +953,13 @@ pub fn load_quantized_safetensors_weights_with_prefix<M: ModuleParametersExt>(
     quantized: bool,
     prefix: &str,
 ) -> Result<(), ModelError> {
+    const MAX_UNMATCHED_WARNS: usize = 5;
     let safetensors_files = collect_safetensors_files(model_path)?;
 
     let mut params = model.parameters_mut().flatten();
 
     // Loader-wide warning budget so throttling doesn't reset per shard.
     let mut total_unmatched_warns = 0usize;
-    const MAX_UNMATCHED_WARNS: usize = 5;
 
     for file_path in &safetensors_files {
         tracing::debug!(file = %file_path.display(), prefix, "Loading weights with prefix");

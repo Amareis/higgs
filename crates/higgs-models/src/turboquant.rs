@@ -11,6 +11,7 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::OnceLock;
 
 use mlx_rs::{Array, Dtype, Stream, argmin_axis, error::Exception, ops};
+#[cfg(test)]
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -180,6 +181,7 @@ impl TurboQuantContext {
             )));
         }
         let dim = usize::try_from(head_dim).map_err(|_| Exception::custom("head_dim overflow"))?;
+        #[allow(clippy::cast_precision_loss)]
         let scale = 1.0 / (head_dim as f32).sqrt();
 
         let key_centroids = scaled_centroids(config.key_bits(), scale)?;
@@ -649,7 +651,7 @@ fn pack_u32_indices(indices: &[u32], bits: u8, out: &mut [u8]) {
     }
 }
 
-#[allow(unsafe_code)]
+#[allow(unsafe_code, clippy::too_many_arguments)]
 pub(crate) fn decode_scores(
     q_rot: &Array,
     key_codes: &Array,
@@ -713,7 +715,7 @@ pub(crate) fn decode_scores(
     result
 }
 
-#[allow(unsafe_code)]
+#[allow(unsafe_code, clippy::too_many_arguments)]
 pub(crate) fn decode_weighted_values(
     weights: &Array,
     value_codes: &Array,
@@ -927,12 +929,14 @@ pub fn fwht(x: &mut [f32]) {
 /// Applying twice recovers the original: `fwht_normalized(fwht_normalized(x)) = x`.
 pub fn fwht_normalized(x: &mut [f32]) {
     fwht(x);
+    #[allow(clippy::cast_precision_loss)]
     let scale = 1.0 / (x.len() as f32).sqrt();
     for val in x.iter_mut() {
         *val *= scale;
     }
 }
 
+#[cfg(test)]
 fn random_normal<R: Rng>(rng: &mut R) -> f32 {
     let u1 = rng.random::<f32>().max(1.0e-7);
     let u2 = rng.random::<f32>();
@@ -954,7 +958,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 // Metal kernel plumbing.
 // ---------------------------------------------------------------------------
 
-/// Per-thread FFI error capture — avoids cross-contamination between threads.
+// Per-thread FFI error capture avoids cross-contamination between threads.
 thread_local! {
     static FFI_LAST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
 }
@@ -1388,7 +1392,13 @@ pub(crate) fn pack_indices_gpu(
 }
 
 #[cfg(test)]
-#[allow(clippy::panic, clippy::unwrap_used, clippy::indexing_slicing)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::float_cmp,
+    clippy::cast_precision_loss
+)]
 mod tests {
     use super::*;
     use rand::SeedableRng;
