@@ -60,12 +60,13 @@ mod tests {
 
     #[test]
     fn engine_uses_threshold_and_keep_rate_from_config() {
-        let engine = match SpecPrefillEngine::new(SpecPrefillConfig {
+        let engine_result = SpecPrefillEngine::new(SpecPrefillConfig {
             min_prompt_len: 128,
             keep_rate: 0.25,
-        }) {
-            Ok(engine) => engine,
-            Err(err) => panic!("spec prefill config should construct: {err}"),
+        });
+        assert!(engine_result.is_ok());
+        let Some(engine) = engine_result.ok() else {
+            return;
         };
 
         assert!(!engine.should_use_spec_prefill(127));
