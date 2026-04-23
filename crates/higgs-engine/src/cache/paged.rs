@@ -21,6 +21,9 @@ impl KvCacheView<'_> {
 
     /// Get block ID for a token position, or `None` if out of range.
     pub fn block_for_token(&self, token_idx: usize) -> Option<u32> {
+        if token_idx >= self.num_tokens {
+            return None;
+        }
         let block_size = self.layout.block_size;
         let block_idx = token_idx / block_size;
         self.blocks.get(block_idx).copied()
@@ -56,6 +59,9 @@ impl PagedKvCache {
         num_kv_heads: usize,
         head_dim: usize,
     ) -> Result<Self, CacheError> {
+        if block_size == 0 {
+            return Err(CacheError::InvalidArgument("block_size must be > 0"));
+        }
         Ok(Self {
             allocator: BlockAllocator::new(num_blocks)?,
             page_table: PageTable::new(),
@@ -90,6 +96,7 @@ impl PagedKvCache {
         if self.session_tokens.contains_key(&session_id) {
             return Err(CacheError::SessionAlreadyExists(session_id));
         }
+        self.page_table.assign_blocks(session_id, &[])?;
         self.session_tokens.insert(session_id, 0);
         Ok(())
     }
@@ -115,6 +122,12 @@ impl PagedKvCache {
             .ok_or(CacheError::SessionNotFound(session_id))?;
 
         let kv_dim = self.storage.layout().elems_per_token();
+        if k.len() != kv_dim || v.len() != kv_dim {
+            return Err(CacheError::GatherLengthMismatch {
+                k_len: k.len(),
+                v_len: v.len(),
+            });
+        }
         let current_block_idx = current_tokens / self.block_size;
         let offset_in_block = current_tokens % self.block_size;
 
@@ -152,6 +165,12 @@ impl PagedKvCache {
             .ok_or(CacheError::SessionNotFound(session_id))?;
 
         let kv_dim = self.storage.layout().elems_per_token();
+        if k.len() != kv_dim || v.len() != kv_dim {
+            return Err(CacheError::GatherLengthMismatch {
+                k_len: k.len(),
+                v_len: v.len(),
+            });
+        }
         let current_block_idx = current_tokens / self.block_size;
         let offset_in_block = current_tokens % self.block_size;
 
@@ -186,16 +205,15 @@ impl PagedKvCache {
 
     /// Remove a session and free its blocks.
     pub fn remove_session(&mut self, session_id: u64) -> Result<(), CacheError> {
-        // Get blocks to free
         let blocks = self.page_table.remove_session(session_id)?;
 
-        // Free blocks
         for block_id in blocks {
             self.allocator.free(block_id)?;
         }
 
-        // Remove token count
-        self.session_tokens.remove(&session_id);
+        self.session_tokens
+            .remove(&session_id)
+            .ok_or(CacheError::SessionNotFound(session_id))?;
 
         Ok(())
     }
@@ -251,24 +269,10 @@ impl PagedKvCache {
         session_id: u64,
         needed_blocks: usize,
     ) -> Result<&[u32], CacheError> {
-        // Check if session exists
-        if !self.page_table.has_session(session_id) {
-            // Allocate initial block
-            let free = self.allocator.free_count();
-            let block_id = self
-                .allocator
-                .alloc()
-                .ok_or(CacheError::OutOfBlocks { requested: 1, free })?;
-            self.page_table.assign_blocks(session_id, &[block_id])?;
-            if needed_blocks == 1 {
-                return self
-                    .page_table
-                    .get_blocks(session_id)
-                    .ok_or(CacheError::SessionNotFound(session_id));
-            }
+        if !self.session_tokens.contains_key(&session_id) {
+            return Err(CacheError::SessionNotFound(session_id));
         }
 
-        // Get current blocks
         let current_blocks = self
             .page_table
             .get_blocks(session_id)
@@ -282,11 +286,9 @@ impl PagedKvCache {
                 .ok_or(CacheError::SessionNotFound(session_id));
         }
 
-        // Allocate additional blocks
         let additional = needed_blocks - current_blocks.len();
         let new_blocks = self.allocator.alloc_n(additional)?;
 
-        // Merge with existing blocks
         let mut all_blocks = current_blocks;
         all_blocks.extend(new_blocks);
         self.page_table.assign_blocks(session_id, &all_blocks)?;

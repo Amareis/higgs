@@ -192,11 +192,11 @@ pub struct Session {
     pub max_tokens: usize,
 }
 
-/// Simple single-request inference engine with paged KV caching and continuous batching.
+/// Simple single-request inference engine with paged KV caching.
 ///
-/// Supports both single-request mode (via `generate()`) and batched mode (via `step()`).
-/// Uses paged KV cache for efficient memory management and round-robin scheduling
-/// for continuous batching across multiple sessions.
+/// Uses paged KV cache for efficient memory management during single-request
+/// generation. Session-based batched stepping APIs are not wired to real decode
+/// yet and return explicit errors instead of placeholder output.
 pub struct SimpleEngine {
     model: Mutex<AnyModel>,
     prefix_cache: Mutex<PagedPrefixCache>,
@@ -217,8 +217,6 @@ pub struct SimpleEngine {
     /// Token ID for `</think>`, resolved from the tokenizer at load time.
     /// `None` if the tokenizer doesn't know this token (thinking will be disabled).
     think_close_token: Option<u32>,
-    /// Maximum batch size for continuous batching
-    max_batch_size: usize,
     /// Number of trailing tokens added by `add_generation_prompt=true`.
     /// Stripped from the prefix cache key so that multi-turn conversations
     /// share the same token prefix (the generation prompt changes between turns).
@@ -355,7 +353,6 @@ impl SimpleEngine {
             eos_token_ids,
             enable_thinking,
             think_close_token,
-            max_batch_size: 4,
             gen_prompt_suffix_len,
             kv_cache_config,
         })
@@ -477,10 +474,16 @@ impl SimpleEngine {
             );
             let suffix = prompt_tokens.get(matched.prefix_len..).unwrap_or_default();
             if suffix.is_empty() {
-                // Full cache hit — feed only the last token to get logits
-                // (cache already contains all KV state from the prefix)
-                let last = prompt_tokens.last().copied().unwrap_or(0);
-                (vec![last], matched.cache)
+                tracing::debug!(
+                    prompt_len = prompt_tokens.len(),
+                    "Full prefix hit requires cached logits; falling back to fresh prefill"
+                );
+                (
+                    prompt_tokens.to_vec(),
+                    model
+                        .make_cache_with_config(self.kv_cache_config)
+                        .map_err(EngineError::Mlx)?,
+                )
             } else {
                 (suffix.to_vec(), matched.cache)
             }
@@ -726,9 +729,9 @@ impl SimpleEngine {
         prompt_tokens: &[u32],
         max_tokens: usize,
     ) -> Result<u64, EngineError> {
-        let mut sessions = lock_or_recover(&self.sessions);
         let mut next_id = lock_or_recover(&self.next_session_id);
         let mut scheduler = lock_or_recover(&self.scheduler);
+        let mut sessions = lock_or_recover(&self.sessions);
         let mut paged_cache = lock_or_recover(&self.paged_cache);
 
         let session_id = *next_id;
@@ -761,8 +764,8 @@ impl SimpleEngine {
 
     /// Remove a session and free its resources.
     pub fn remove_session(&self, session_id: u64) -> Result<(), EngineError> {
-        let mut sessions = lock_or_recover(&self.sessions);
         let mut scheduler = lock_or_recover(&self.scheduler);
+        let mut sessions = lock_or_recover(&self.sessions);
         let mut paged_cache = lock_or_recover(&self.paged_cache);
 
         sessions.remove(&session_id);
@@ -790,88 +793,9 @@ impl SimpleEngine {
         &self,
         _params: &SamplingParams,
     ) -> Result<Vec<(u64, GenerationOutput)>, EngineError> {
-        let mut outputs = Vec::new();
-        let mut scheduler = lock_or_recover(&self.scheduler);
-        let mut sessions = lock_or_recover(&self.sessions);
-
-        // Process up to max_batch_size sessions
-        // TODO: Implement true batching with gather operations
-        for _ in 0..self.max_batch_size {
-            let session_id = match scheduler.next() {
-                Some(id) => id,
-                None => break,
-            };
-
-            let session = match sessions.get_mut(&session_id) {
-                Some(s) => s,
-                None => continue,
-            };
-
-            if session.finished {
-                scheduler.remove(session_id);
-                continue;
-            }
-
-            // Generate one token using existing infrastructure
-            // TODO: Replace with paged-cache-based generation
-            let Some(&last_token) = session.tokens.last() else {
-                continue; // Should have prompt tokens
-            };
-
-            // Check EOS before generating
-            if self.eos_token_ids.contains(&last_token) && session.tokens.len() > 1 {
-                session.finished = true;
-                scheduler.remove(session_id);
-                outputs.push((
-                    session_id,
-                    GenerationOutput {
-                        text: self.decode_tokens(&session.tokens)?,
-                        finish_reason: "stop".to_owned(),
-                        prompt_tokens: 1, // Placeholder
-                        completion_tokens: u32::try_from(session.tokens.len().saturating_sub(1))
-                            .unwrap_or(u32::MAX),
-                        token_logprobs: None,
-                    },
-                ));
-                continue;
-            }
-
-            // Check max tokens
-            if session.tokens.len() >= session.max_tokens {
-                session.finished = true;
-                scheduler.remove(session_id);
-                outputs.push((
-                    session_id,
-                    GenerationOutput {
-                        text: self.decode_tokens(&session.tokens)?,
-                        finish_reason: "length".to_owned(),
-                        prompt_tokens: 1, // Placeholder
-                        completion_tokens: u32::try_from(session.tokens.len().saturating_sub(1))
-                            .unwrap_or(u32::MAX),
-                        token_logprobs: None,
-                    },
-                ));
-                continue;
-            }
-
-            // For now, mark session as needing full generation
-            // True incremental generation with paged cache is TODO
-            session.finished = true;
-            scheduler.remove(session_id);
-
-            outputs.push((
-                session_id,
-                GenerationOutput {
-                    text: self.decode_tokens(&session.tokens)?,
-                    finish_reason: "length".to_owned(),
-                    prompt_tokens: 1,
-                    completion_tokens: u32::try_from(session.tokens.len()).unwrap_or(u32::MAX),
-                    token_logprobs: None,
-                },
-            ));
-        }
-
-        Ok(outputs)
+        Err(EngineError::Generation(
+            "session stepping is not implemented for SimpleEngine yet".to_owned(),
+        ))
     }
 
     /// Generate a complete response for a session (batched mode).
@@ -886,21 +810,9 @@ impl SimpleEngine {
         _logprobs: bool,
         _top_logprobs: Option<u32>,
     ) -> Result<GenerationOutput, EngineError> {
-        let sessions = lock_or_recover(&self.sessions);
-
-        let session = sessions
-            .get(&session_id)
-            .ok_or_else(|| EngineError::Generation(format!("Session {session_id} not found")))?;
-
-        // For now, just return accumulated tokens
-        // TODO: Implement paged-cache-based generation
-        Ok(GenerationOutput {
-            text: String::new(),
-            finish_reason: "length".to_owned(),
-            prompt_tokens: 1,
-            completion_tokens: u32::try_from(session.tokens.len()).unwrap_or(u32::MAX),
-            token_logprobs: None,
-        })
+        Err(EngineError::Generation(format!(
+            "session generation is not implemented for SimpleEngine yet (session {session_id})"
+        )))
     }
 
     /// Generate a complete response from a token prompt.

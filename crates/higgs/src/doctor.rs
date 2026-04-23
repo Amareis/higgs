@@ -71,6 +71,25 @@ fn model_label(model: &crate::config::ModelConfig) -> String {
 fn check_models(config: &HiggsConfig, result: &mut DoctorResult) {
     for model in &config.models {
         let label = model_label(model);
+        match model.kv_cache_config().validate() {
+            Ok(()) => {}
+            Err(err) => {
+                fail(
+                    &format!("model {label} has invalid KV cache config: {err}"),
+                    result,
+                );
+                continue;
+            }
+        }
+        if model.batch && model.kv_cache_config().is_turboquant() {
+            fail(
+                &format!(
+                    "model {label} enables unsupported combination: TurboQuant with batch=true"
+                ),
+                result,
+            );
+            continue;
+        }
         match model_resolver::resolve(&model.path) {
             Ok(_) => pass(&format!("model {label} resolvable"), result),
             Err(err) => fail(&format!("model {label} not found: {err}"), result),

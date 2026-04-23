@@ -24,18 +24,24 @@ const FOUR_BIT_CENTROIDS: [f32; 16] = [
     -2.7326, -2.0690, -1.6180, -1.2562, -0.9424, -0.6568, -0.3881, -0.1284, 0.1284, 0.3881, 0.6568,
     0.9424, 1.2562, 1.6180, 2.0690, 2.7326,
 ];
+/// KV-cache storage mode for a model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum KvCacheMode {
+    /// Store dense floating-point KV tensors.
     #[default]
     Off,
+    /// Store KV tensors using `TurboQuant` compression.
     Turboquant,
 }
 
+/// User-facing `TurboQuant` configuration for KV caches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KvCacheConfig {
+    /// Cache storage mode. Defaults to [`KvCacheMode::Off`].
     #[serde(default)]
     pub mode: KvCacheMode,
+    /// Default `TurboQuant` bit-width used when no per-key/value override is set.
     #[serde(default = "default_bits")]
     pub bits: u8,
     /// Override key bit width (default: bits - 1).
@@ -106,7 +112,7 @@ impl KvCacheConfig {
     pub const fn key_bits(self) -> u8 {
         match self.key_bits_override {
             Some(kb) => kb,
-            None => self.bits - 1,
+            None => self.bits.saturating_sub(1),
         }
     }
 
@@ -336,19 +342,24 @@ impl TurboQuantContext {
         ))
     }
 
+    fn validate_batch_input(&self, x: &Array, name: &str) -> Result<(i32, i32), Exception> {
+        let shape = x.shape();
+        if shape.len() != 3 || shape[2] != self.head_dim {
+            return Err(Exception::custom(format!(
+                "{name}: expected [H, T, {}], got {:?}",
+                self.head_dim, shape
+            )));
+        }
+        Ok((shape[0], shape[1]))
+    }
+
     /// Batch-quantize values using GPU ops.
     ///
     /// Input: `[H, T, D]` f32 tensor.
     /// Returns `(norms: [H, T], packed_codes: Vec<u8>)` where `packed_codes` is
     /// laid out as `[H * T * value_code_bytes]` in row-major order.
     pub fn quantize_values_batch(&self, values: &Array) -> Result<BatchQuantizedValues, Exception> {
-        let shape = values.shape();
-        let h = *shape
-            .first()
-            .ok_or_else(|| Exception::custom("quantize_values_batch: values has no dim 0"))?;
-        let t = *shape
-            .get(1)
-            .ok_or_else(|| Exception::custom("quantize_values_batch: values has no dim 1"))?;
+        let (h, t) = self.validate_batch_input(values, "quantize_values_batch")?;
 
         // norms: [H, T]
         let raw_norms = ops::sqrt(&ops::sum_axis(&ops::square(values)?, -1, None)?)?;
@@ -420,13 +431,7 @@ impl TurboQuantContext {
     /// Input: `[H, T, D]` f32 tensor.
     /// Returns `BatchQuantizedKeys` with norms, gammas, and packed MSE codes.
     pub fn quantize_keys_batch(&self, keys: &Array) -> Result<BatchQuantizedKeys, Exception> {
-        let shape = keys.shape();
-        let h = *shape
-            .first()
-            .ok_or_else(|| Exception::custom("quantize_keys_batch: keys has no dim 0"))?;
-        let t = *shape
-            .get(1)
-            .ok_or_else(|| Exception::custom("quantize_keys_batch: keys has no dim 1"))?;
+        let (h, t) = self.validate_batch_input(keys, "quantize_keys_batch")?;
         let key_bits = self.config.key_bits();
 
         // norms: [H, T]
@@ -498,15 +503,7 @@ impl TurboQuantContext {
     /// Returns `(norms: [H, T] f32, packed_codes: [H, T, value_code_words] u32)`.
     /// No `eval()` or CPU readback — the entire graph stays lazy.
     pub fn quantize_values_gpu(&self, values: &Array) -> Result<(Array, Array), Exception> {
-        if values.ndim() < 3 {
-            return Err(Exception::custom(format!(
-                "quantize_values_gpu: expected ndim >= 3, got {}",
-                values.ndim()
-            )));
-        }
-        let shape = values.shape();
-        let h = shape[0];
-        let t = shape[1];
+        let (h, t) = self.validate_batch_input(values, "quantize_values_gpu")?;
         let n = h * t;
 
         // norms: [H, T]
@@ -557,15 +554,7 @@ impl TurboQuantContext {
     /// Input: `[H, T, D]` f32 tensor.
     /// Returns `(norms [H,T], gammas [H,T], packed_codes [H,T,key_code_words] u32)`.
     pub fn quantize_keys_gpu(&self, keys: &Array) -> Result<(Array, Array, Array), Exception> {
-        if keys.ndim() < 3 {
-            return Err(Exception::custom(format!(
-                "quantize_keys_gpu: expected ndim >= 3, got {}",
-                keys.ndim()
-            )));
-        }
-        let shape = keys.shape();
-        let h = shape[0];
-        let t = shape[1];
+        let (h, t) = self.validate_batch_input(keys, "quantize_keys_gpu")?;
         let n = h * t;
         let key_bits = self.config.key_bits();
 
@@ -616,16 +605,23 @@ impl TurboQuantContext {
 
 /// Result of batch value quantization.
 pub struct BatchQuantizedValues {
+    /// Per-row output norms in `[H, T]` row-major order.
     pub norms: Vec<f32>,
+    /// Packed code bytes for each `[H, T]` row.
     pub packed_codes: Vec<u8>,
+    /// Number of packed bytes per row.
     pub code_bytes: usize,
 }
 
 /// Result of batch key quantization.
 pub struct BatchQuantizedKeys {
+    /// Per-row output norms in `[H, T]` row-major order.
     pub norms: Vec<f32>,
+    /// Per-row gamma values in `[H, T]` row-major order.
     pub gammas: Vec<f32>,
+    /// Packed code bytes for each `[H, T]` row.
     pub packed_codes: Vec<u8>,
+    /// Number of packed bytes per key row.
     pub key_code_bytes: usize,
 }
 
@@ -665,6 +661,20 @@ pub(crate) fn decode_scores(
     key_bits: u8,
     key_code_words: i32,
 ) -> Result<Array, Exception> {
+    if capacity <= 0 || seq_len <= 0 || seq_len > capacity {
+        return Err(Exception::custom(format!(
+            "decode_scores: seq_len ({seq_len}) must be in [1, capacity ({capacity})]"
+        )));
+    }
+    if num_heads <= 0
+        || num_kv_heads <= 0
+        || num_heads < num_kv_heads
+        || num_heads % num_kv_heads != 0
+    {
+        return Err(Exception::custom(format!(
+            "decode_scores: num_heads ({num_heads}) must be a positive multiple of num_kv_heads ({num_kv_heads})"
+        )));
+    }
     ensure_ffi_error_handler();
 
     let stream = Stream::task_local_or_default();
@@ -729,6 +739,20 @@ pub(crate) fn decode_weighted_values(
     value_bits: u8,
     value_code_words: i32,
 ) -> Result<Array, Exception> {
+    if capacity <= 0 || seq_len <= 0 || seq_len > capacity {
+        return Err(Exception::custom(format!(
+            "decode_weighted_values: seq_len ({seq_len}) must be in [1, capacity ({capacity})]"
+        )));
+    }
+    if num_heads <= 0
+        || num_kv_heads <= 0
+        || num_heads < num_kv_heads
+        || num_heads % num_kv_heads != 0
+    {
+        return Err(Exception::custom(format!(
+            "decode_weighted_values: num_heads ({num_heads}) must be a positive multiple of num_kv_heads ({num_kv_heads})"
+        )));
+    }
     ensure_ffi_error_handler();
 
     let stream = Stream::task_local_or_default();
@@ -904,9 +928,9 @@ fn unpack_index(data: &[u8], index: usize, bits: u8) -> u8 {
 /// `fwht(fwht(x)) / D = x`.
 pub fn fwht(x: &mut [f32]) {
     let n = x.len();
-    debug_assert!(
-        n.is_power_of_two(),
-        "FWHT requires power-of-2 length, got {n}"
+    assert!(
+        n > 0 && n.is_power_of_two(),
+        "FWHT requires non-zero power-of-2 length, got {n}"
     );
     let mut stride = n >> 1;
     while stride > 0 {

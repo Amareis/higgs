@@ -226,23 +226,33 @@ const fn default_max_body_size() -> usize {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
+    /// Filesystem path or Hugging Face reference for the model.
     pub path: String,
+    /// Optional external name exposed to API clients.
     #[serde(default)]
     pub name: Option<String>,
+    /// Enable the separate batch engine for this model.
     #[serde(default)]
     pub batch: bool,
+    /// KV-cache storage mode.
     #[serde(default)]
     pub kv_cache: KvCacheMode,
+    /// Default `TurboQuant` bit width when per-key/value overrides are absent.
     #[serde(default = "default_kv_bits")]
     pub kv_bits: u8,
+    /// Optional override for key-code bit width.
     #[serde(default)]
     pub kv_key_bits: Option<u8>,
+    /// Optional override for value-code bit width.
     #[serde(default)]
     pub kv_value_bits: Option<u8>,
+    /// Enable norm correction after `TurboQuant` reconstruction.
     #[serde(default = "default_norm_correction")]
     pub kv_norm_correction: bool,
+    /// Number of final layers that should remain dense when `TurboQuant` is enabled.
     #[serde(default)]
     pub kv_adaptive_dense_layers: u8,
+    /// Seed used by `TurboQuant` setup.
     #[serde(default)]
     pub kv_seed: u64,
 }
@@ -551,8 +561,10 @@ pub fn load_config_file(path: &Path, args: Option<&ServeArgs>) -> Result<HiggsCo
                     kv_seed: serve_args.kv_seed.unwrap_or_default(),
                 })
                 .collect();
-            let mut existing: Vec<ModelConfig> =
-                figment.extract_inner("models").unwrap_or_default();
+            let mut existing = figment
+                .extract_inner::<Option<Vec<ModelConfig>>>("models")
+                .map_err(|e| format!("failed to parse models from {}: {e}", path.display()))?
+                .unwrap_or_default();
             existing.extend(extra);
             figment = figment.merge(Serialized::default("models", &existing));
         }

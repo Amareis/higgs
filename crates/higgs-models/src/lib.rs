@@ -260,7 +260,7 @@ impl AnyModel {
         }
 
         if chunk_size >= T {
-            return self.forward(inputs, None, cache);
+            return self.forward_last_token(inputs, None, cache);
         }
 
         // For Qwen3Next, delegate to the model's own chunked prefill which
@@ -288,7 +288,7 @@ impl AnyModel {
 
         // Last chunk: forward + LM head projection on last position only.
         let last_chunk = inputs.index((.., offset..));
-        self.forward(&last_chunk, None, cache)
+        self.forward_last_token(&last_chunk, None, cache)
     }
 
     /// Batched decode forward pass for N requests each with 1 token.
@@ -452,13 +452,15 @@ impl AnyModel {
                 }
             }
             Self::Qwen3Moe(m) => {
+                let head_dim = match m.args.head_dim {
+                    Some(head_dim) => head_dim,
+                    None => checked_head_dim(m.args.hidden_size, m.args.num_attention_heads)?,
+                };
                 if kv_cache_config.is_turboquant() {
                     make_turboquant_kv_cache(
                         m.args.num_hidden_layers,
                         m.args.num_key_value_heads,
-                        m.args
-                            .head_dim
-                            .unwrap_or_else(|| m.args.hidden_size / m.args.num_attention_heads),
+                        head_dim,
                         kv_cache_config,
                     )
                 } else {

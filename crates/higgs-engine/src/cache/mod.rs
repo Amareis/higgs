@@ -41,6 +41,9 @@ pub enum CacheError {
     #[error("Gather output length mismatch: k={k_len}, v={v_len}")]
     GatherLengthMismatch { k_len: usize, v_len: usize },
 
+    #[error("Invalid cache argument: {0}")]
+    InvalidArgument(&'static str),
+
     #[error("Block count {0} exceeds u32::MAX")]
     BlockCountOverflow(usize),
 }

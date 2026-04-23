@@ -253,6 +253,7 @@ impl RadixNode {
 
 impl PagedPrefixCache {
     pub fn new(max_entries: usize, block_size: usize) -> Self {
+        assert!(block_size > 0, "PagedPrefixCache block_size must be > 0");
         Self {
             root: RadixNode::empty(),
             num_cached: 0,
@@ -296,20 +297,37 @@ impl PagedPrefixCache {
         // CachedData::TurboQuantPaged variant but requires the TQ arrays to be
         // populated (post-activation). For now, use clone fallback when TQ config
         // is set but arrays aren't yet quantized to avoid cache corruption.
-        let data = match slice_into_blocks(cache, self.block_size) {
+        let data = match slice_into_blocks(cache, self.block_size, prefix_tokens.len()) {
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to page cache, using clone fallback");
-                CachedData::Cloned(cache.clone())
+                match kv_offset(cache).and_then(|offset| usize::try_from(offset).ok()) {
+                    Some(offset) if offset > prefix_tokens.len() => {
+                        tracing::warn!(
+                            cache_tokens = offset,
+                            key_tokens = prefix_tokens.len(),
+                            "Skipping prefix cache store: cache longer than key"
+                        );
+                        return;
+                    }
+                    _ => CachedData::Cloned(cache.clone()),
+                }
             }
         };
 
-        let aligned_len = match &data {
+        let stored_len = match &data {
             CachedData::Paged { total_tokens, .. }
             | CachedData::TurboQuantPaged { total_tokens, .. } => *total_tokens,
             CachedData::Cloned(_) => prefix_tokens.len(),
         };
-        let tokens_to_store = prefix_tokens.get(..aligned_len).unwrap_or(prefix_tokens);
+        let Some(tokens_to_store) = prefix_tokens.get(..stored_len) else {
+            tracing::warn!(
+                key_tokens = prefix_tokens.len(),
+                stored_len,
+                "Skipping prefix cache store: cache longer than key"
+            );
+            return;
+        };
 
         let added = Self::insert(&mut self.root, tokens_to_store, 0, data);
 
@@ -459,7 +477,11 @@ fn kv_offset(cache: &AnyCache) -> Option<i32> {
 }
 
 /// Slice a cache into block-aligned paged data.
-fn slice_into_blocks(cache: &AnyCache, block_size: usize) -> Result<CachedData, Exception> {
+fn slice_into_blocks(
+    cache: &AnyCache,
+    block_size: usize,
+    max_tokens: usize,
+) -> Result<CachedData, Exception> {
     // Hybrid caches (GDN+KV) can't be block-paged because GDN sequential state
     // doesn't align to block boundaries. The KV offset would mismatch the GDN
     // offset after materialization, producing corrupt attention. Use clone instead.
@@ -469,7 +491,7 @@ fn slice_into_blocks(cache: &AnyCache, block_size: usize) -> Result<CachedData, 
 
     let offset = kv_offset(cache).unwrap_or(0);
     let offset_usize = usize::try_from(offset).unwrap_or(0);
-    let num_blocks = offset_usize / block_size;
+    let num_blocks = offset_usize.min(max_tokens) / block_size;
     if num_blocks == 0 {
         return Err(Exception::custom("Cache too short for paging"));
     }
@@ -686,10 +708,7 @@ fn gather_blocks(blocks: &[KvBlock]) -> Result<SteppingKeyValueCache, Exception>
     };
 
     if blocks.len() == 1 {
-        return Ok(SteppingKeyValueCache::from_arrays(
-            first.keys.clone(),
-            first.values.clone(),
-        ));
+        return SteppingKeyValueCache::from_arrays(first.keys.clone(), first.values.clone());
     }
 
     let key_arrays: Vec<Array> = blocks.iter().map(|b| b.keys.clone()).collect();
@@ -697,7 +716,7 @@ fn gather_blocks(blocks: &[KvBlock]) -> Result<SteppingKeyValueCache, Exception>
     let keys = concatenate_axis(&key_arrays, 2)?;
     let values = concatenate_axis(&value_arrays, 2)?;
 
-    Ok(SteppingKeyValueCache::from_arrays(keys, values))
+    SteppingKeyValueCache::from_arrays(keys, values)
 }
 
 /// Gather TQ blocks into a single `SteppingKeyValueCache` with TQ storage.
@@ -730,7 +749,7 @@ fn gather_tq_blocks(
     // Total tokens = sum of block sizes along axis 1.
     let total = key_norms.shape().get(1).copied().unwrap_or(0);
 
-    Ok(SteppingKeyValueCache::from_turbo_arrays(
+    SteppingKeyValueCache::from_turbo_arrays(
         Arc::clone(context),
         key_codes,
         key_norms,
@@ -738,7 +757,7 @@ fn gather_tq_blocks(
         value_codes,
         value_norms,
         total,
-    ))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -764,7 +783,7 @@ mod tests {
             .map(|_| {
                 let keys = Array::zeros::<f32>(&[1, 2, seq_len, 8]).unwrap();
                 let values = Array::zeros::<f32>(&[1, 2, seq_len, 8]).unwrap();
-                Some(SteppingKeyValueCache::from_arrays(keys, values))
+                Some(SteppingKeyValueCache::from_arrays(keys, values).unwrap())
             })
             .collect();
         AnyCache::KV(layers)
@@ -784,9 +803,9 @@ mod tests {
                 } else {
                     let keys = Array::zeros::<f32>(&[1, 2, seq_len, 8]).unwrap();
                     let values = Array::zeros::<f32>(&[1, 2, seq_len, 8]).unwrap();
-                    Some(LayerCache::KV(SteppingKeyValueCache::from_arrays(
-                        keys, values,
-                    )))
+                    Some(LayerCache::KV(
+                        SteppingKeyValueCache::from_arrays(keys, values).unwrap(),
+                    ))
                 }
             })
             .collect();
@@ -1039,7 +1058,7 @@ mod tests {
         // Verify that from_arrays produces a cache that can accept new tokens.
         let keys = Array::ones::<f32>(&[1, 2, 32, 8]).unwrap();
         let values = Array::ones::<f32>(&[1, 2, 32, 8]).unwrap();
-        let mut kv = SteppingKeyValueCache::from_arrays(keys, values);
+        let mut kv = SteppingKeyValueCache::from_arrays(keys, values).unwrap();
         assert_eq!(KeyValueCache::offset(&kv), 32);
 
         // Simulate a decode step

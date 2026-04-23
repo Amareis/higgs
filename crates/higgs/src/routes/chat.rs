@@ -334,13 +334,17 @@ async fn chat_completions_non_streaming(
     } else {
         output.text
     };
-    let reasoning_result = higgs_engine::reasoning_parser::parse_reasoning(&parse_input);
-    let raw_text = if reasoning_result.reasoning.is_some() {
-        reasoning_result.text
+    let (raw_text, reasoning_content) = if thinking_enabled {
+        let reasoning_result = higgs_engine::reasoning_parser::parse_reasoning(&parse_input);
+        let raw_text = if reasoning_result.reasoning.is_some() {
+            reasoning_result.text
+        } else {
+            parse_input
+        };
+        (raw_text, reasoning_result.reasoning)
     } else {
-        parse_input
+        (parse_input, None)
     };
-    let reasoning_content = reasoning_result.reasoning;
 
     let (content, tool_calls, finish_reason) = if has_tools {
         let parsed = higgs_engine::tool_parser::parse_tool_calls(&raw_text);

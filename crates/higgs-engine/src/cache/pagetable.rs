@@ -20,9 +20,6 @@ impl PageTable {
 
     /// Assign blocks to a session.
     pub fn assign_blocks(&mut self, session_id: u64, blocks: &[u32]) -> Result<(), CacheError> {
-        if blocks.is_empty() {
-            return Ok(());
-        }
         self.sessions.insert(session_id, blocks.to_vec());
         Ok(())
     }
