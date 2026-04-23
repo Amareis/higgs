@@ -28,7 +28,6 @@ pub struct MtpCycleResult {
 /// 3. Check if backbone's prediction matches the draft
 /// 4. If accepted: process draft through backbone too, return both tokens
 /// 5. If rejected: return just confirmed (draft was never processed, no rollback needed)
-#[allow(clippy::as_conversions, clippy::cast_possible_truncation)]
 pub fn mtp_cycle(
     model: &mut AnyModel,
     cache: &mut AnyCache,

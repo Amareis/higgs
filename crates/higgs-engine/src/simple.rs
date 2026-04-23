@@ -2019,7 +2019,7 @@ fn detect_thinking_support(model_dir: &Path) -> bool {
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::{
-        check_stop_sequences, derive_model_name, parse_enabled_flag,
+        check_stop_sequences, derive_model_name, estimate_paged_kv_blocks, parse_enabled_flag,
         parse_positive_chunked_prefill_value,
     };
     use std::path::Path;
@@ -2250,37 +2250,18 @@ mod tests {
     }
 
     #[test]
-    fn test_session_management() {
-        use tempfile::TempDir;
+    fn test_estimate_paged_kv_blocks_clamps_to_minimum() {
+        assert_eq!(estimate_paged_kv_blocks(512, 512, 64), 256);
+    }
 
-        // Create a minimal test model directory
-        let temp_dir = TempDir::new().unwrap();
-        let config_json = r#"{
-            "model_type": "qwen3_5_moe",
-            "architectures": ["Qwen3_5ForCausalLM"],
-            "hidden_size": 64,
-            "num_hidden_layers": 2,
-            "num_attention_heads": 4,
-            "num_key_value_heads": 2,
-            "intermediate_size": 128,
-            "num_experts": 4,
-            "num_experts_per_tok": 2,
-            "moe_intermediate_size": 64,
-            "shared_expert_intermediate_size": 64,
-            "vocab_size": 1000,
-            "eos_token_id": 2,
-            "full_attention_interval": 2,
-            "partial_rotary_factor": 0.25,
-            "head_dim": 16,
-            "rope_theta": 10000.0,
-            "rms_norm_eps": 1e-6,
-            "quantization": {"group_size": 64, "bits": 4}
-        }"#;
-        std::fs::write(temp_dir.path().join("config.json"), config_json).unwrap();
+    #[test]
+    fn test_estimate_paged_kv_blocks_clamps_to_maximum() {
+        assert_eq!(estimate_paged_kv_blocks(1, 1, 1), 4096);
+    }
 
-        // Note: We can't actually load the model without weights, so we test
-        // session management methods directly on the engine structure
-        // This is a placeholder test - full integration testing requires model weights
+    #[test]
+    fn test_estimate_paged_kv_blocks_scales_with_geometry() {
+        assert_eq!(estimate_paged_kv_blocks(8, 128, 64), 2048);
     }
 
     #[test]

@@ -46,3 +46,29 @@ impl SpecPrefillEngine {
         self.config.keep_rate
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{SpecPrefillConfig, SpecPrefillEngine};
+
+    #[test]
+    fn default_config_matches_expected_thresholds() {
+        let config = SpecPrefillConfig::default();
+        assert_eq!(config.min_prompt_len, 2048);
+        assert_eq!(config.keep_rate, 0.5);
+    }
+
+    #[test]
+    fn engine_uses_threshold_and_keep_rate_from_config() {
+        let engine = SpecPrefillEngine::new(SpecPrefillConfig {
+            min_prompt_len: 128,
+            keep_rate: 0.25,
+        })
+        .unwrap();
+
+        assert!(!engine.should_use_spec_prefill(127));
+        assert!(engine.should_use_spec_prefill(128));
+        assert_eq!(engine.get_keep_rate(32), 0.25);
+        assert_eq!(engine.get_keep_rate(4096), 0.25);
+    }
+}
