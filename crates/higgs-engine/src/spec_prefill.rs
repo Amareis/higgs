@@ -55,7 +55,7 @@ mod tests {
     fn default_config_matches_expected_thresholds() {
         let config = SpecPrefillConfig::default();
         assert_eq!(config.min_prompt_len, 2048);
-        assert_eq!(config.keep_rate, 0.5);
+        assert!((config.keep_rate - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -64,11 +64,11 @@ mod tests {
             min_prompt_len: 128,
             keep_rate: 0.25,
         })
-        .unwrap();
+        .expect("spec prefill config should construct");
 
         assert!(!engine.should_use_spec_prefill(127));
         assert!(engine.should_use_spec_prefill(128));
-        assert_eq!(engine.get_keep_rate(32), 0.25);
-        assert_eq!(engine.get_keep_rate(4096), 0.25);
+        assert!((engine.get_keep_rate(32) - 0.25).abs() < f32::EPSILON);
+        assert!((engine.get_keep_rate(4096) - 0.25).abs() < f32::EPSILON);
     }
 }
