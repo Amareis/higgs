@@ -3,9 +3,9 @@ use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Tab
 
 use crate::tui::TuiConfig;
 
-pub fn draw(frame: &mut Frame, area: Rect, config: Option<&TuiConfig>) {
+pub fn draw(frame: &mut Frame, area: Rect, config: Option<&TuiConfig>, sidebar_width_pct: u16) {
     if let Some(c) = config {
-        draw_with_config(frame, area, c);
+        draw_with_config(frame, area, c, sidebar_width_pct);
     } else {
         let msg = Paragraph::new("No configuration available")
             .alignment(Alignment::Center)
@@ -15,7 +15,7 @@ pub fn draw(frame: &mut Frame, area: Rect, config: Option<&TuiConfig>) {
 }
 
 #[allow(clippy::indexing_slicing)]
-fn draw_with_config(frame: &mut Frame, area: Rect, config: &TuiConfig) {
+fn draw_with_config(frame: &mut Frame, area: Rect, config: &TuiConfig, sidebar_width_pct: u16) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -28,7 +28,7 @@ fn draw_with_config(frame: &mut Frame, area: Rect, config: &TuiConfig) {
     // Layout::split with 3 constraints always returns 3 elements
     draw_auto_router(frame, chunks[0], config);
     draw_routes_table(frame, chunks[1], config);
-    draw_bottom_panels(frame, chunks[2], config);
+    draw_bottom_panels(frame, chunks[2], config, sidebar_width_pct);
 }
 
 fn draw_auto_router(frame: &mut Frame, area: Rect, config: &TuiConfig) {
@@ -134,11 +134,20 @@ fn draw_routes_table(frame: &mut Frame, area: Rect, config: &TuiConfig) {
 }
 
 #[allow(clippy::indexing_slicing)]
-fn draw_bottom_panels(frame: &mut Frame, area: Rect, config: &TuiConfig) {
-    let cols = Layout::default()
+fn bottom_panel_columns(area: Rect, sidebar_width_pct: u16) -> std::rc::Rc<[Rect]> {
+    let providers_width_pct = 100_u16.saturating_sub(sidebar_width_pct);
+    Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
+        .constraints([
+            Constraint::Percentage(sidebar_width_pct),
+            Constraint::Percentage(providers_width_pct),
+        ])
+        .split(area)
+}
+
+#[allow(clippy::indexing_slicing)]
+fn draw_bottom_panels(frame: &mut Frame, area: Rect, config: &TuiConfig, sidebar_width_pct: u16) {
+    let cols = bottom_panel_columns(area, sidebar_width_pct);
 
     // Local models list
     let model_items: Vec<ListItem> = if config.model_names.is_empty() {
@@ -225,7 +234,7 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                draw(f, f.area(), None);
+                draw(f, f.area(), None, 50);
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -244,7 +253,7 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                draw(f, f.area(), Some(&config));
+                draw(f, f.area(), Some(&config), 50);
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -266,7 +275,7 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                draw(f, f.area(), Some(&config));
+                draw(f, f.area(), Some(&config), 50);
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -276,5 +285,18 @@ mod tests {
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
         assert!(content.contains("ENABLED"));
+    }
+
+    #[test]
+    fn bottom_panel_columns_follow_sidebar_width() {
+        let area = Rect::new(0, 0, 100, 8);
+
+        let default_cols = bottom_panel_columns(area, 50);
+        assert_eq!(default_cols[0].width, 50);
+        assert_eq!(default_cols[1].width, 50);
+
+        let wide_models_cols = bottom_panel_columns(area, 65);
+        assert_eq!(wide_models_cols[0].width, 65);
+        assert_eq!(wide_models_cols[1].width, 35);
     }
 }
