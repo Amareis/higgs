@@ -281,7 +281,8 @@ impl MetricsStore {
     clippy::unwrap_used,
     clippy::indexing_slicing,
     clippy::expect_used,
-    clippy::unchecked_time_subtraction
+    clippy::unchecked_time_subtraction,
+    clippy::duration_suboptimal_units
 )]
 mod tests {
     use super::*;

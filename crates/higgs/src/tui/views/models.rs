@@ -142,7 +142,7 @@ pub fn draw(
 }
 
 #[cfg(test)]
-#[allow(clippy::panic, clippy::unwrap_used)]
+#[allow(clippy::panic, clippy::unwrap_used, clippy::duration_suboptimal_units)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};

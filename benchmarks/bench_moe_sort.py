@@ -181,8 +181,8 @@ def main():
         print(f"{L:>8} | {t_nosort*1000:>11.2f} ms | {t_ptsort*1000:>11.2f} ms | "
               f"{t_global*1000:>11.2f} ms | {speedup:>8.2f}x")
 
-    # Also time just the sort overhead
-    print("\n--- Sort overhead alone ---")
+    # Also time the global sort plus the gather it currently requires.
+    print("\n--- Sort + gather overhead ---")
     for L in [128, 512, 2048]:
         x, indices = make_inputs(1, L)
         x_exp = x.reshape(1, L, 1, 1, HIDDEN)

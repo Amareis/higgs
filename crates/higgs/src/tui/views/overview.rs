@@ -260,7 +260,7 @@ fn draw_live_log(
     let p99 = MetricsStore::duration_percentile(&durations, 99);
 
     let mut sorted: Vec<_> = snap.iter().collect();
-    sorted.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    sorted.sort_by_key(|record| std::cmp::Reverse(record.timestamp));
 
     let total_rows = sorted.len();
 
@@ -346,7 +346,12 @@ pub fn draw(frame: &mut Frame, area: Rect, metrics: &Arc<MetricsStore>, scroll: 
 }
 
 #[cfg(test)]
-#[allow(clippy::panic, clippy::unwrap_used, clippy::indexing_slicing)]
+#[allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::duration_suboptimal_units
+)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};

@@ -33,12 +33,21 @@ pub struct ChatCompletionRequest {
     pub logprobs: Option<bool>,
     #[serde(default)]
     pub top_logprobs: Option<u32>,
+    /// Optional OpenAI-style reasoning controls.
+    ///
+    /// When omitted, Higgs chooses a model-specific default. Set `effort` to
+    /// a non-empty value such as `"low"` to explicitly enable reasoning.
     #[serde(default)]
     pub reasoning: Option<ReasoningConfig>,
 }
 
+/// Optional reasoning controls accepted on chat completion requests.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReasoningConfig {
+    /// Requested reasoning effort level.
+    ///
+    /// Higgs currently treats any non-empty value as an explicit opt-in to the
+    /// model's reasoning / thinking mode and preserves the original string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
 }
@@ -212,6 +221,7 @@ pub struct ChatCompletionChunk {
     pub created: i64,
     pub model: String,
     pub choices: Vec<ChatCompletionChunkChoice>,
+    /// Optional token usage summary attached to the terminal stream chunk.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<CompletionUsage>,
 }

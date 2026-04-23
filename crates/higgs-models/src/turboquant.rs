@@ -11,8 +11,7 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::OnceLock;
 
 use mlx_rs::{Array, Dtype, Stream, argmin_axis, error::Exception, ops};
-#[cfg(test)]
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 const ONE_BIT_CENTROIDS: [f32; 2] = [-0.797_884_6, 0.797_884_6];
@@ -172,6 +171,8 @@ pub struct TurboQuantContext {
     pub key_code_words: i32,
     /// Number of packed u32 words per value head.
     pub value_code_words: i32,
+    /// Deterministic sign mask applied before/after the Hadamard projection.
+    pub projection_signs: Vec<f32>,
 }
 
 impl TurboQuantContext {
@@ -198,6 +199,7 @@ impl TurboQuantContext {
         let value_code_bytes = packed_bytes(dim, config.value_bits())?;
         let key_code_words = packed_words(dim, config.key_bits())?;
         let value_code_words = packed_words(dim, config.value_bits())?;
+        let projection_signs = projection_signs(dim, config.seed);
 
         Ok(Self {
             config,
@@ -209,6 +211,7 @@ impl TurboQuantContext {
             value_code_bytes,
             key_code_words,
             value_code_words,
+            projection_signs,
         })
     }
 
@@ -228,6 +231,7 @@ impl TurboQuantContext {
         }
 
         let mut normalized: Vec<f32> = values.iter().map(|value| *value / norm).collect();
+        apply_projection_signs_in_place(&mut normalized, &self.projection_signs);
         fwht_normalized(&mut normalized);
         let indices = quantize_rotated(&normalized, &self.value_centroids);
 
@@ -268,6 +272,7 @@ impl TurboQuantContext {
         }
 
         let mut normalized: Vec<f32> = keys.iter().map(|value| *value / norm).collect();
+        apply_projection_signs_in_place(&mut normalized, &self.projection_signs);
         fwht_normalized(&mut normalized);
         let mse_indices = quantize_rotated(&normalized, &self.key_centroids);
 
@@ -304,6 +309,7 @@ impl TurboQuantContext {
         let mut rotated =
             dequantize_rotated(&value.codes, bits, &self.value_centroids, dim, value.norm);
         fwht_normalized(&mut rotated);
+        apply_projection_signs_in_place(&mut rotated, &self.projection_signs);
         Ok(rotated)
     }
 
@@ -320,11 +326,13 @@ impl TurboQuantContext {
         }
         let mut rotated = dequantize_rotated(&key.codes, bits, &self.key_centroids, dim, key.norm);
         fwht_normalized(&mut rotated);
+        apply_projection_signs_in_place(&mut rotated, &self.projection_signs);
         Ok(rotated)
     }
 
     pub fn rotate_queries(&self, queries: &Array) -> Result<Array, Exception> {
-        queries.as_dtype(Dtype::Float32)?.hadamard_transform(None)
+        let signed = self.apply_projection_signs_batch(&queries.as_dtype(Dtype::Float32)?)?;
+        signed.hadamard_transform(None)
     }
 
     pub fn key_centroids_array(&self) -> Result<Array, Exception> {
@@ -341,6 +349,22 @@ impl TurboQuantContext {
             &[i32::try_from(self.value_centroids.len())
                 .map_err(|_| Exception::custom("value centroid len overflow"))?],
         ))
+    }
+
+    fn projection_signs_array(&self) -> Result<Array, Exception> {
+        Ok(Array::from_slice(
+            &self.projection_signs,
+            &[i32::try_from(self.projection_signs.len())
+                .map_err(|_| Exception::custom("projection sign len overflow"))?],
+        ))
+    }
+
+    fn apply_projection_signs_batch(&self, x: &Array) -> Result<Array, Exception> {
+        let signs = self
+            .projection_signs_array()?
+            .expand_dims(0)?
+            .expand_dims(0)?;
+        ops::multiply(x, &signs)
     }
 
     fn validate_batch_input(&self, x: &Array, name: &str) -> Result<(i32, i32), Exception> {
@@ -369,9 +393,10 @@ impl TurboQuantContext {
         let eps = Array::from_f32(f32::EPSILON);
         let safe_norms = ops::maximum(&raw_norms, &eps)?;
         let normalized = ops::divide(values, &safe_norms.expand_dims(-1)?)?;
+        let signed = self.apply_projection_signs_batch(&normalized)?;
 
         // rotated: [H, T, D] = hadamard(normalized) — orthonormal FWHT replaces D×D matmul
-        let rotated = normalized.hadamard_transform(None)?;
+        let rotated = signed.hadamard_transform(None)?;
 
         // distances: [H, T, D, C] = |rotated[..., None] - centroids|
         let centroids = self.value_centroids_array()?;
@@ -442,9 +467,10 @@ impl TurboQuantContext {
         let eps = Array::from_f32(f32::EPSILON);
         let safe_norms = ops::maximum(&raw_norms, &eps)?;
         let normalized = ops::divide(keys, &safe_norms.expand_dims(-1)?)?;
+        let signed = self.apply_projection_signs_batch(&normalized)?;
 
         // rotated: [H, T, D] = hadamard(normalized)
-        let rotated = normalized.hadamard_transform(None)?;
+        let rotated = signed.hadamard_transform(None)?;
 
         // MSE quantize: find nearest centroid in rotated space
         let key_centroids = self.key_centroids_array()?;
@@ -512,9 +538,10 @@ impl TurboQuantContext {
         let eps = Array::from_f32(f32::EPSILON);
         let safe_norms = ops::maximum(&norms, &eps)?;
         let normalized = ops::divide(values, &safe_norms.expand_dims(-1)?)?;
+        let signed = self.apply_projection_signs_batch(&normalized)?;
 
         // rotated: [H, T, D] = hadamard(normalized)
-        let rotated = normalized.hadamard_transform(None)?;
+        let rotated = signed.hadamard_transform(None)?;
 
         // distances: [H, T, D, C] = |rotated[..., None] - centroids|
         let centroids = self.value_centroids_array()?;
@@ -564,9 +591,10 @@ impl TurboQuantContext {
         let eps = Array::from_f32(f32::EPSILON);
         let safe_norms = ops::maximum(&norms, &eps)?;
         let normalized = ops::divide(keys, &safe_norms.expand_dims(-1)?)?;
+        let signed = self.apply_projection_signs_batch(&normalized)?;
 
         // rotated: [H, T, D] = hadamard(normalized)
-        let rotated = normalized.hadamard_transform(None)?;
+        let rotated = signed.hadamard_transform(None)?;
 
         // MSE quantize: find nearest centroid in rotated space
         let key_centroids = self.key_centroids_array()?;
@@ -801,6 +829,23 @@ pub(crate) fn decode_weighted_values(
     }
 
     result
+}
+
+fn projection_signs(dim: usize, seed: u64) -> Vec<f32> {
+    if seed == 0 {
+        return vec![1.0; dim];
+    }
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    (0..dim)
+        .map(|_| if rng.random::<bool>() { 1.0 } else { -1.0 })
+        .collect()
+}
+
+fn apply_projection_signs_in_place(values: &mut [f32], signs: &[f32]) {
+    for (value, sign) in values.iter_mut().zip(signs.iter().copied()) {
+        *value *= sign;
+    }
 }
 
 fn scaled_centroids(bits: u8, scale: f32) -> Result<Vec<f32>, Exception> {
@@ -1624,6 +1669,38 @@ mod tests {
         let q2 = ctx2.quantize_value(&vec).unwrap();
         assert_eq!(q1.codes, q2.codes);
         assert_eq!(q1.norm, q2.norm);
+    }
+
+    #[test]
+    fn test_different_seeds_change_projection() {
+        let vec = random_vector(64, 99);
+        let ctx1 = TurboQuantContext::new(
+            KvCacheConfig {
+                mode: KvCacheMode::Turboquant,
+                bits: 3,
+                seed: 7,
+                ..Default::default()
+            },
+            64,
+            1,
+        )
+        .unwrap();
+        let ctx2 = TurboQuantContext::new(
+            KvCacheConfig {
+                mode: KvCacheMode::Turboquant,
+                bits: 3,
+                seed: 8,
+                ..Default::default()
+            },
+            64,
+            1,
+        )
+        .unwrap();
+
+        let q1 = ctx1.quantize_value(&vec).unwrap();
+        let q2 = ctx2.quantize_value(&vec).unwrap();
+        assert_ne!(ctx1.projection_signs, ctx2.projection_signs);
+        assert_ne!(q1.codes, q2.codes);
     }
 
     // ── Batch vs scalar equivalence ──────────────────────────────────────

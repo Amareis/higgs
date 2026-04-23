@@ -36,7 +36,7 @@ impl MetricsLogger {
         if self.max_files == 0 {
             return Ok(());
         }
-        let size = fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        let size = fs::metadata(&self.path).map_or(0, |m| m.len());
         if size < self.max_size {
             return Ok(());
         }

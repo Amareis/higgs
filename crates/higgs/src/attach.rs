@@ -146,7 +146,8 @@ pub fn tail_log(path: &Path, store: &Arc<MetricsStore>, stop: &Arc<AtomicBool>) 
     clippy::unwrap_used,
     clippy::indexing_slicing,
     clippy::expect_used,
-    clippy::option_if_let_else
+    clippy::option_if_let_else,
+    clippy::duration_suboptimal_units
 )]
 mod tests {
     use super::*;

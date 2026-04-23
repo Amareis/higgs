@@ -198,9 +198,13 @@ pub(crate) fn set_wired_limit_to_max() {
 /// Session state for batched generation.
 #[derive(Debug, Clone)]
 pub struct Session {
+    /// Stable session identifier used by the scheduler and paged KV cache.
     pub id: u64,
+    /// Prompt plus generated token IDs accumulated so far for this session.
     pub tokens: Vec<u32>,
+    /// Whether generation for this session has already terminated.
     pub finished: bool,
+    /// Maximum number of completion tokens allowed for this session.
     pub max_tokens: usize,
 }
 

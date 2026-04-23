@@ -11,7 +11,7 @@ pub fn draw(frame: &mut Frame, area: Rect, metrics: &Arc<MetricsStore>, scroll: 
 
     let now = std::time::Instant::now();
     let mut errors: Vec<_> = snap.iter().filter(|r| r.status >= 400).collect();
-    errors.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    errors.sort_by_key(|record| std::cmp::Reverse(record.timestamp));
 
     let header = Row::new(vec!["Age", "Model", "Provider", "Status", "Error"])
         .style(Style::default().add_modifier(Modifier::BOLD));
@@ -62,7 +62,7 @@ pub fn draw(frame: &mut Frame, area: Rect, metrics: &Arc<MetricsStore>, scroll: 
 }
 
 #[cfg(test)]
-#[allow(clippy::panic, clippy::unwrap_used)]
+#[allow(clippy::panic, clippy::unwrap_used, clippy::duration_suboptimal_units)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};

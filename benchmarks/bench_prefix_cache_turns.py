@@ -216,7 +216,8 @@ def bench_model(model_dir, label):
         except (ProcessLookupError, subprocess.TimeoutExpired):
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
+                proc.wait(timeout=5)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
                 pass
         time.sleep(2)
 

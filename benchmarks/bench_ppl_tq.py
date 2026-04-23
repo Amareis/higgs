@@ -218,32 +218,36 @@ def test_quality_sequential(model_path, port, bits):
     # Step 1: Collect baseline outputs
     print("\n  Collecting baseline outputs...")
     proc = start_server(model_path, port)
-    model_id = get_model_id(port)
     base_outputs = []
-    for i, prompt in enumerate(prompts):
-        content, usage, elapsed, lp = chat(
-            port, model_id, [{"role": "user", "content": prompt}],
-            max_tokens=64, logprobs=True, top_logprobs=5,
-        )
-        base_outputs.append(content)
-        print(f"    [{i+1}/{len(prompts)}] {len(content)} chars")
-    stop_server(proc)
+    try:
+        model_id = get_model_id(port)
+        for i, prompt in enumerate(prompts):
+            content, _usage, _elapsed, _lp = chat(
+                port, model_id, [{"role": "user", "content": prompt}],
+                max_tokens=64, logprobs=True, top_logprobs=5,
+            )
+            base_outputs.append(content)
+            print(f"    [{i+1}/{len(prompts)}] {len(content)} chars")
+    finally:
+        stop_server(proc)
     print("  Baseline server stopped.")
     time.sleep(3)
 
     # Step 2: Collect TQ outputs
     print(f"\n  Collecting TQ-{bits}bit outputs...")
     proc = start_server(model_path, port, kv_mode="turboquant", kv_bits=bits)
-    model_id = get_model_id(port)
     tq_outputs = []
-    for i, prompt in enumerate(prompts):
-        content, usage, elapsed, lp = chat(
-            port, model_id, [{"role": "user", "content": prompt}],
-            max_tokens=64, logprobs=True, top_logprobs=5,
-        )
-        tq_outputs.append(content)
-        print(f"    [{i+1}/{len(prompts)}] {len(content)} chars")
-    stop_server(proc)
+    try:
+        model_id = get_model_id(port)
+        for i, prompt in enumerate(prompts):
+            content, _usage, _elapsed, _lp = chat(
+                port, model_id, [{"role": "user", "content": prompt}],
+                max_tokens=64, logprobs=True, top_logprobs=5,
+            )
+            tq_outputs.append(content)
+            print(f"    [{i+1}/{len(prompts)}] {len(content)} chars")
+    finally:
+        stop_server(proc)
     print("  TQ server stopped.")
     time.sleep(3)
 

@@ -23,6 +23,8 @@ fn log_path(profile: Option<&str>) -> std::path::PathBuf {
 
 static EXEC_CHILD_PID: AtomicI32 = AtomicI32::new(0);
 static EXEC_SIGINT_RECEIVED: AtomicBool = AtomicBool::new(false);
+const EVICTION_INTERVAL_SECS: u64 = 60;
+const DEFAULT_RETENTION_SECS: u64 = 365 * 24 * 60 * 60;
 
 extern "C" fn exec_sigint_handler(_: i32) {
     EXEC_SIGINT_RECEIVED.store(true, Ordering::SeqCst);
@@ -452,7 +454,7 @@ pub fn run_attached(config: &HiggsConfig, profile: Option<&str>) {
     let evict_stop = Arc::clone(&stop);
     let _evict_handle = std::thread::spawn(move || {
         while !evict_stop.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_secs(60));
+            std::thread::sleep(Duration::from_secs(EVICTION_INTERVAL_SECS));
             evict_metrics.evict_expired();
         }
     });
@@ -473,7 +475,7 @@ pub const fn retention_duration(config: &HiggsConfig) -> Duration {
     if config.retention.enabled {
         Duration::from_secs(config.retention.minutes.saturating_mul(60))
     } else {
-        Duration::from_secs(365 * 24 * 60 * 60)
+        Duration::from_secs(DEFAULT_RETENTION_SECS)
     }
 }
 
@@ -498,7 +500,7 @@ pub fn create_metrics(config: &HiggsConfig) -> Arc<MetricsStore> {
 pub fn spawn_eviction_task(metrics: &Arc<MetricsStore>) {
     let evict_metrics = Arc::clone(metrics);
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let mut interval = tokio::time::interval(Duration::from_secs(EVICTION_INTERVAL_SECS));
         loop {
             interval.tick().await;
             evict_metrics.evict_expired();
@@ -670,7 +672,10 @@ mod tests {
             },
             ..HiggsConfig::default()
         };
-        assert_eq!(retention_duration(&config), Duration::from_secs(1800));
+        assert_eq!(
+            retention_duration(&config),
+            Duration::from_secs(config.retention.minutes.saturating_mul(60))
+        );
     }
 
     #[test]
@@ -684,7 +689,7 @@ mod tests {
         };
         assert_eq!(
             retention_duration(&config),
-            Duration::from_secs(365 * 24 * 60 * 60)
+            Duration::from_secs(DEFAULT_RETENTION_SECS)
         );
     }
 

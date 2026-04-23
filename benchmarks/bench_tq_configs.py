@@ -148,42 +148,42 @@ def bench_config(model_path, label, extra_args=None):
         print(f"  Args: {' '.join(extra_args)}")
     print(f"{'='*60}")
 
-    proc = start_server(model_path, PORT, extra_args)
-    model_id = get_model_id(PORT)
-    print(f"  Server ready: {model_id}")
-
     results = {"label": label, "args": extra_args or []}
+    proc = start_server(model_path, PORT, extra_args)
+    try:
+        model_id = get_model_id(PORT)
+        print(f"  Server ready: {model_id}")
 
-    # Warmup
-    chat(PORT, model_id, [{"role": "user", "content": "hi"}], max_tokens=2)
+        # Warmup
+        chat(PORT, model_id, [{"role": "user", "content": "hi"}], max_tokens=2)
 
-    # Prefill + Decode at various context sizes
-    context_sizes = [100, 1000, 4000]
-    print(f"\n  {'Context':>8} | {'TTFT ms':>10} | {'Decode t/s':>12} | {'Gen toks':>10}")
-    print(f"  {'-'*50}")
+        # Prefill + Decode at various context sizes
+        context_sizes = [100, 1000, 4000]
+        print(f"\n  {'Context':>8} | {'TTFT ms':>10} | {'Decode t/s':>12} | {'Gen toks':>10}")
+        print(f"  {'-'*50}")
 
-    sweep = []
-    for ctx in context_sizes:
-        prompt = WORD * max(1, ctx // 10)
-        try:
-            r = measure_decode(PORT, model_id, prompt, gen_tokens=64)
-            print(f"  {r['ptoks']:>8} | {r['ttft_ms']:>7.0f} ms | {r['tps']:>9.1f} t/s | {r['ctoks']:>10}")
-            sweep.append(r)
-        except Exception as e:
-            print(f"  {ctx:>8} | {'FAILED':>40} | {str(e)[:30]}")
-            sweep.append({"ptoks": ctx, "tps": 0, "error": str(e)[:50]})
+        sweep = []
+        for ctx in context_sizes:
+            prompt = WORD * max(1, ctx // 10)
+            try:
+                r = measure_decode(PORT, model_id, prompt, gen_tokens=64)
+                print(f"  {r['ptoks']:>8} | {r['ttft_ms']:>7.0f} ms | {r['tps']:>9.1f} t/s | {r['ctoks']:>10}")
+                sweep.append(r)
+            except Exception as e:
+                print(f"  {ctx:>8} | {'FAILED':>40} | {str(e)[:30]}")
+                sweep.append({"ptoks": ctx, "tps": 0, "error": str(e)[:50]})
 
-    results["sweep"] = sweep
+        results["sweep"] = sweep
 
-    # Quality: 10 prompts
-    print(f"\n  Generating quality prompts...")
-    prompts, outputs = run_quality_prompts(PORT, model_id)
-    results["outputs"] = outputs
-    print(f"  Got {len(outputs)} outputs, avg {sum(len(o) for o in outputs)//len(outputs)} chars")
-
-    stop_server(proc)
-    print(f"  Server stopped.")
-    time.sleep(3)
+        # Quality: 10 prompts
+        print("\n  Generating quality prompts...")
+        _prompts, outputs = run_quality_prompts(PORT, model_id)
+        results["outputs"] = outputs
+        print(f"  Got {len(outputs)} outputs, avg {sum(len(o) for o in outputs)//len(outputs)} chars")
+    finally:
+        stop_server(proc)
+        print("  Server stopped.")
+        time.sleep(3)
 
     return results
 
