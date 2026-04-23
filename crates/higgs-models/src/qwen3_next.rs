@@ -3508,7 +3508,36 @@ impl Qwen3NextCausalLM {
 pub fn load_model_args<P: AsRef<Path>>(model_dir: P) -> Result<Qwen3NextModelArgs, ModelError> {
     let config_path = model_dir.as_ref().join("config.json");
     let file = std::fs::File::open(config_path)?;
-    Ok(serde_json::from_reader(file)?)
+    let config: serde_json::Value = serde_json::from_reader(file)?;
+    load_qwen3_next_args_from_value(config)
+}
+
+fn gate_quantization_override(config: &serde_json::Value) -> Option<serde_json::Value> {
+    let quant = config.get("quantization")?;
+    for key in [
+        "model.layers.0.mlp.gate",
+        "language_model.model.layers.0.mlp.gate",
+    ] {
+        if let Some(gate_q) = quant.get(key) {
+            return Some(gate_q.clone());
+        }
+    }
+    None
+}
+
+fn load_qwen3_next_args_from_value(
+    mut config: serde_json::Value,
+) -> Result<Qwen3NextModelArgs, ModelError> {
+    let gate_override = gate_quantization_override(&config);
+    let map = config
+        .as_object_mut()
+        .ok_or_else(|| ModelError::UnsupportedModel("config.json root is not an object".into()))?;
+    if !map.contains_key("gate_quantization") {
+        if let Some(gate_q) = gate_override {
+            map.insert("gate_quantization".to_owned(), gate_q);
+        }
+    }
+    Ok(serde_json::from_value(config)?)
 }
 
 /// Load a `Qwen3Next` model from a directory containing safetensors + config.json.
@@ -3616,11 +3645,8 @@ fn load_qwen3_5_moe_text_config_args<P: AsRef<Path>>(
     );
 
     // Detect per-layer gate quantization override from top-level quantization config
-    if let Some(quant) = config.get("quantization") {
-        let gate_key = "language_model.model.layers.0.mlp.gate";
-        if let Some(gate_q) = quant.get(gate_key) {
-            map.insert("gate_quantization".to_owned(), gate_q.clone());
-        }
+    if let Some(gate_q) = gate_quantization_override(&config) {
+        map.insert("gate_quantization".to_owned(), gate_q);
     }
 
     Ok(serde_json::from_value(obj)?)
@@ -4312,6 +4338,46 @@ mod tests {
         }"#;
         let args: Qwen3NextModelArgs = serde_json::from_str(json).unwrap();
         assert!(args.quantization.is_none());
+    }
+
+    #[test]
+    fn test_load_qwen3_next_args_injects_gate_quantization_override() {
+        let config = serde_json::json!({
+            "model_type": "qwen3_next",
+            "hidden_size": 64,
+            "num_hidden_layers": 2,
+            "intermediate_size": 128,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 1,
+            "head_dim": 16,
+            "rms_norm_eps": 1e-6,
+            "vocab_size": 1024,
+            "max_position_embeddings": 4096,
+            "linear_num_value_heads": 4,
+            "linear_num_key_heads": 4,
+            "linear_key_head_dim": 16,
+            "linear_value_head_dim": 16,
+            "linear_conv_kernel_dim": 4,
+            "num_experts": 8,
+            "num_experts_per_tok": 2,
+            "decoder_sparse_step": 1,
+            "shared_expert_intermediate_size": 32,
+            "moe_intermediate_size": 32,
+            "full_attention_interval": 4,
+            "quantization": {
+                "group_size": 64,
+                "bits": 4,
+                "model.layers.0.mlp.gate": {
+                    "group_size": 64,
+                    "bits": 8
+                }
+            }
+        });
+
+        let args = load_qwen3_next_args_from_value(config).unwrap();
+        let gate_q = args.gate_quantization.unwrap();
+        assert_eq!(gate_q.group_size, 64);
+        assert_eq!(gate_q.bits, 8);
     }
 
     #[test]
