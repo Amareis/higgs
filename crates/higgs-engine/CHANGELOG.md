@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.1.21](https://github.com/panbanda/higgs/compare/higgs-engine-v0.1.20...higgs-engine-v0.1.21) (2026-04-24)
+
+
+### Features
+
+* add qwen3.5/qwen3.6 turboquant stack ([4f165ee](https://github.com/panbanda/higgs/commit/4f165eeca1166ac1d1b62cbaf523b83d344b9a22))
+* inference engine — chunked prefill, prefix cache, thinking budget, MTP ([4fa0971](https://github.com/panbanda/higgs/commit/4fa09711096dc40cff8b2b33b6c5ad1b87e4b128))
+* Qwen3.5 model architecture, TurboQuant KV cache, and model-level optimizations ([1514737](https://github.com/panbanda/higgs/commit/1514737d4e1fb108c68b3150e9104aae5b20f400))
+* thinking mode support — reasoning parser and chat template ([a3cc52e](https://github.com/panbanda/higgs/commit/a3cc52e7e1f3ef12118b011156cc7b7bad6c05fb))
+* tune qwen3.6 thinking defaults ([6969834](https://github.com/panbanda/higgs/commit/696983431b7c404bf5efea4978398251603ac6ec))
+
+
+### Bug Fixes
+
+* address coderabbit issues ([6f10bc6](https://github.com/panbanda/higgs/commit/6f10bc6d733c192d30c5ab3aed76e4a2e2a69818))
+* address remaining draft review issues ([4396e88](https://github.com/panbanda/higgs/commit/4396e8840e399af4abb60c84dfc4412ba8b2131f))
+* address review items across models and engine — PR [#74](https://github.com/panbanda/higgs/issues/74) ([8863e2d](https://github.com/panbanda/higgs/commit/8863e2d11dacbdada6e560556813c051bf265d8b))
+* cargo fmt + restore higgs crate build on PR [#74](https://github.com/panbanda/higgs/issues/74) ([050af95](https://github.com/panbanda/higgs/commit/050af9590968c129dc8f0a5003d4af47f6591da5))
+* clear lint and review blockers ([9c8b878](https://github.com/panbanda/higgs/commit/9c8b878bb654ba8865f3455c91ba457b83d1161b))
+* **engine,models:** cache config propagation, ndim guards, FSM ordering ([37d2ddd](https://github.com/panbanda/higgs/commit/37d2ddd3c222614373f9ee3c49b43e5e69e35c62))
+* **engine,models:** clippy clean lib targets on PR [#74](https://github.com/panbanda/higgs/issues/74) (51→0 errors) ([ebf3192](https://github.com/panbanda/higgs/commit/ebf319238ed9a79c8efc18bba6b0fbfc6b98f3e3))
+* **engine:** clippy clean 6 files on PR [#74](https://github.com/panbanda/higgs/issues/74) (85→51 errors) ([7dc7370](https://github.com/panbanda/higgs/commit/7dc737052edea2fdf96c4ab7a097051c0ba34562))
+* **engine:** prefix cache full-hit, scheduler leak, gather bounds check ([3e35b3f](https://github.com/panbanda/higgs/commit/3e35b3f8e3fe83604883418e408bae09e3533c39))
+* make pre-push pass on dust stack ([2695165](https://github.com/panbanda/higgs/commit/26951659aa8ff56d0362a6916827dbe9cf6fae88))
+* stabilize dust stack CI ([8e629e3](https://github.com/panbanda/higgs/commit/8e629e35e53bb65b9a6dd718be5d2d50a79e297c))
+
 ## [0.1.20](https://github.com/panbanda/higgs/compare/higgs-engine-v0.1.19...higgs-engine-v0.1.20) (2026-02-28)
 
 

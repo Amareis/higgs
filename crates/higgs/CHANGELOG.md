@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.1.21](https://github.com/panbanda/higgs/compare/higgs-v0.1.20...higgs-v0.1.21) (2026-04-24)
+
+
+### Features
+
+* add qwen3.5/qwen3.6 turboquant stack ([4f165ee](https://github.com/panbanda/higgs/commit/4f165eeca1166ac1d1b62cbaf523b83d344b9a22))
+* API routes — thinking mode streaming and tool call validation ([5f7e62c](https://github.com/panbanda/higgs/commit/5f7e62cb8eeb168dfb36d98eea2d39c54cf4e950))
+* server config — TurboQuant, thinking budget, chunked prefill settings ([5b63e4c](https://github.com/panbanda/higgs/commit/5b63e4c9bedee401adf6f23b319316f55727c7f1))
+* tune qwen3.6 thinking defaults ([6969834](https://github.com/panbanda/higgs/commit/696983431b7c404bf5efea4978398251603ac6ec))
+
+
+### Bug Fixes
+
+* address coderabbit issues ([6f10bc6](https://github.com/panbanda/higgs/commit/6f10bc6d733c192d30c5ab3aed76e4a2e2a69818))
+* cargo fmt + restore higgs crate build on PR [#74](https://github.com/panbanda/higgs/issues/74) ([050af95](https://github.com/panbanda/higgs/commit/050af9590968c129dc8f0a5003d4af47f6591da5))
+* clear lint and review blockers ([9c8b878](https://github.com/panbanda/higgs/commit/9c8b878bb654ba8865f3455c91ba457b83d1161b))
+* **config:** timeout validation and figment model merge ([441884d](https://github.com/panbanda/higgs/commit/441884d6450e2ce486ff3e131b37033296ea3cc9))
+* make pre-push pass on dust stack ([2695165](https://github.com/panbanda/higgs/commit/26951659aa8ff56d0362a6916827dbe9cf6fae88))
+* remove incorrect default_value on Option&lt;u8&gt; CLI arg — PR [#75](https://github.com/panbanda/higgs/issues/75) ([bf87bbd](https://github.com/panbanda/higgs/commit/bf87bbd4b9f5b2a88e386f2bb7b03beb0f07534d))
+* restore higgs crate build on PR [#75](https://github.com/panbanda/higgs/issues/75) — chat.rs usage stubs ([f92d139](https://github.com/panbanda/higgs/commit/f92d139e4d8b1319169d168c73c92db52bf01a4d))
+* **routes:** close think tag on length-stopped reasoning in OpenAI path ([5c2ea56](https://github.com/panbanda/higgs/commit/5c2ea56566fafbf8198f2bca34d3454ea70c2ca2))
+* stabilize dust stack CI ([8e629e3](https://github.com/panbanda/higgs/commit/8e629e35e53bb65b9a6dd718be5d2d50a79e297c))
+* support clippy across toolchains ([abc316d](https://github.com/panbanda/higgs/commit/abc316d1c573db20a1921530782752f41ee745f4))
+* support mlx qwen3.6 smoke ([7046849](https://github.com/panbanda/higgs/commit/704684970b3cf43ad9bc3644e74422e378dacfd4))
+
 ## [0.1.20](https://github.com/panbanda/higgs/compare/higgs-v0.1.19...higgs-v0.1.20) (2026-02-28)
 
 
