@@ -570,49 +570,55 @@ mod tests {
         );
     }
 
-    fn write_json(path: &std::path::Path, value: serde_json::Value) {
-        fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    fn write_json(path: &std::path::Path, value: &serde_json::Value) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
+            std::io::Error::other(format!("failed to serialize JSON fixture: {error}"))
+        })?;
+        fs::write(path, bytes)
     }
 
     #[test]
-    fn test_from_model_dir_reads_config_and_resolves_large_auto_to_throughput() {
-        let temp = TempDir::new().unwrap();
+    fn test_from_model_dir_reads_config_and_resolves_large_auto_to_throughput()
+    -> std::io::Result<()> {
+        let temp = TempDir::new().map_err(std::io::Error::other)?;
         let config_path = temp.path().join("config.json");
         write_json(
             &config_path,
-            serde_json::json!({
+            &serde_json::json!({
                 "num_hidden_layers": 72,
                 "hidden_size": 4096,
             }),
-        );
+        )?;
         let tuning = MlxRuntimeTuning::from_model_dir(temp.path(), RequestedMlxProfile::Auto);
         assert_eq!(tuning.requested_profile(), RequestedMlxProfile::Auto);
         assert_eq!(tuning.resolved_profile(), ResolvedMlxProfile::Throughput);
         assert!(tuning.chunked_prefill_threshold() >= 1024);
         assert!(tuning.chunked_prefill_chunk_size() >= 1024);
         assert!(tuning.enable_mtp());
+        Ok(())
     }
 
     #[test]
-    fn test_resolve_effective_profile_auto_classification_via_model_fixture() {
-        let small = TempDir::new().unwrap();
-        let large = TempDir::new().unwrap();
+    fn test_resolve_effective_profile_auto_classification_via_model_fixture() -> std::io::Result<()>
+    {
+        let small = TempDir::new().map_err(std::io::Error::other)?;
+        let large = TempDir::new().map_err(std::io::Error::other)?;
         let small_config = small.path().join("config.json");
         write_json(
             &small_config,
-            serde_json::json!({
+            &serde_json::json!({
                 "num_hidden_layers": 20,
                 "hidden_size": 2048,
             }),
-        );
+        )?;
         let large_config = large.path().join("config.json");
         write_json(
             &large_config,
-            serde_json::json!({
+            &serde_json::json!({
                 "num_hidden_layers": 56,
                 "hidden_size": 8192,
             }),
-        );
+        )?;
 
         assert_eq!(
             resolve_effective_mlx_profile(small.path(), RequestedMlxProfile::Auto),
@@ -622,18 +628,19 @@ mod tests {
             resolve_effective_mlx_profile(large.path(), RequestedMlxProfile::Auto),
             ResolvedMlxProfile::Throughput
         );
+        Ok(())
     }
 
     #[test]
-    fn test_resolve_runtime_tuning_applies_requested_latency_profile() {
-        let temp = TempDir::new().unwrap();
+    fn test_resolve_runtime_tuning_applies_requested_latency_profile() -> std::io::Result<()> {
+        let temp = TempDir::new().map_err(std::io::Error::other)?;
         write_json(
             &temp.path().join("config.json"),
-            serde_json::json!({
+            &serde_json::json!({
                 "num_hidden_layers": 32,
                 "hidden_size": 3072,
             }),
-        );
+        )?;
 
         let tuning = resolve_runtime_tuning(temp.path(), RequestedMlxProfile::Latency);
         assert_eq!(tuning.requested_profile(), RequestedMlxProfile::Latency);
@@ -642,6 +649,7 @@ mod tests {
         assert_eq!(tuning.chunked_prefill_chunk_size(), 768);
         assert!(!tuning.clear_cache_after_prefill());
         assert!(tuning.enable_mtp());
+        Ok(())
     }
 
     #[test]
@@ -663,8 +671,8 @@ mod tests {
     }
 
     #[test]
-    fn test_from_model_dir_defaults_when_config_and_weights_missing() {
-        let temp = TempDir::new().unwrap();
+    fn test_from_model_dir_defaults_when_config_and_weights_missing() -> std::io::Result<()> {
+        let temp = TempDir::new().map_err(std::io::Error::other)?;
         let missing = temp.path().join("missing-dir");
         let tuning = resolve_runtime_tuning(&missing, RequestedMlxProfile::Auto);
         assert_eq!(tuning.requested_profile(), RequestedMlxProfile::Auto);
@@ -672,16 +680,18 @@ mod tests {
         assert_eq!(tuning.chunked_prefill_threshold(), 2048);
         assert_eq!(tuning.chunked_prefill_chunk_size(), 1024);
         assert!(tuning.enable_mtp());
+        Ok(())
     }
 
     #[test]
-    fn test_from_model_dir_handles_unreadable_config_gracefully() {
-        let temp = TempDir::new().unwrap();
-        fs::write(temp.path().join("config.json"), b"{not valid json").unwrap();
+    fn test_from_model_dir_handles_unreadable_config_gracefully() -> std::io::Result<()> {
+        let temp = TempDir::new().map_err(std::io::Error::other)?;
+        fs::write(temp.path().join("config.json"), b"{not valid json")?;
         let tuning = resolve_runtime_tuning(temp.path(), RequestedMlxProfile::Throughput);
         assert_eq!(tuning.requested_profile(), RequestedMlxProfile::Throughput);
         assert_eq!(tuning.resolved_profile(), ResolvedMlxProfile::Throughput);
         assert_eq!(tuning.chunked_prefill_threshold(), 2048);
         assert!(tuning.enable_mtp());
+        Ok(())
     }
 }
