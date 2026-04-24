@@ -287,6 +287,10 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    const ONE_MINUTE_SECS: u64 = 60;
+    const FIVE_MINUTES_SECS: u64 = 5 * 60;
+    const ONE_HOUR_SECS: u64 = 60 * 60;
+
     fn sample_record() -> RequestRecord {
         RequestRecord {
             id: 0,
@@ -305,13 +309,13 @@ mod tests {
 
     #[test]
     fn window_returns_configured_duration() {
-        let store = MetricsStore::new(Duration::from_secs(3600));
-        assert_eq!(store.window(), Duration::from_secs(3600));
+        let store = MetricsStore::new(Duration::from_secs(ONE_HOUR_SECS));
+        assert_eq!(store.window(), Duration::from_secs(ONE_HOUR_SECS));
     }
 
     #[test]
     fn records_and_retrieves() {
-        let store = MetricsStore::new(Duration::from_secs(60));
+        let store = MetricsStore::new(Duration::from_secs(ONE_MINUTE_SECS));
         store.record(sample_record());
         let snap = store.snapshot();
         assert_eq!(snap.len(), 1);
@@ -342,7 +346,7 @@ mod tests {
 
     #[test]
     fn snapshot_returns_owned_data() {
-        let store = MetricsStore::new(Duration::from_secs(60));
+        let store = MetricsStore::new(Duration::from_secs(ONE_MINUTE_SECS));
         store.record(sample_record());
         let snap = store.snapshot();
         drop(snap);
@@ -351,7 +355,7 @@ mod tests {
 
     #[test]
     fn group_by_model() {
-        let store = MetricsStore::new(Duration::from_secs(60));
+        let store = MetricsStore::new(Duration::from_secs(ONE_MINUTE_SECS));
         for _ in 0..3 {
             store.record(sample_record());
         }
@@ -368,7 +372,7 @@ mod tests {
 
     #[test]
     fn status_counts_all_codes() {
-        let store = MetricsStore::new(Duration::from_secs(60));
+        let store = MetricsStore::new(Duration::from_secs(ONE_MINUTE_SECS));
         for status in [200, 200, 429, 429, 429, 500] {
             let mut r = sample_record();
             r.status = status;
@@ -384,7 +388,7 @@ mod tests {
 
     #[test]
     fn tokens_per_minute_buckets() {
-        let store = MetricsStore::new(Duration::from_secs(300));
+        let store = MetricsStore::new(Duration::from_secs(FIVE_MINUTES_SECS));
         for _ in 0..3 {
             let mut r = sample_record();
             r.input_tokens = 100;
@@ -399,7 +403,7 @@ mod tests {
 
     #[test]
     fn requests_per_minute_buckets() {
-        let store = MetricsStore::new(Duration::from_secs(300));
+        let store = MetricsStore::new(Duration::from_secs(FIVE_MINUTES_SECS));
         for _ in 0..5 {
             store.record(sample_record());
         }
@@ -411,7 +415,7 @@ mod tests {
 
     #[test]
     fn record_pending_returns_unique_ids() {
-        let store = MetricsStore::new(Duration::from_secs(60));
+        let store = MetricsStore::new(Duration::from_secs(ONE_MINUTE_SECS));
         let id0 = store.record_pending(sample_record());
         let id1 = store.record_pending(sample_record());
         assert_ne!(id0, id1);
@@ -421,7 +425,7 @@ mod tests {
 
     #[test]
     fn finalize_stream_updates_record_by_id() {
-        let store = MetricsStore::new(Duration::from_secs(60));
+        let store = MetricsStore::new(Duration::from_secs(ONE_MINUTE_SECS));
         let mut rec = sample_record();
         rec.output_tokens = 0;
         rec.duration = Duration::ZERO;
@@ -437,7 +441,7 @@ mod tests {
 
     #[test]
     fn finalize_stream_ignores_unknown_id() {
-        let store = MetricsStore::new(Duration::from_secs(60));
+        let store = MetricsStore::new(Duration::from_secs(ONE_MINUTE_SECS));
         store.record(sample_record());
         store.finalize_stream(999_999, 100, Duration::from_secs(1));
         assert_eq!(store.snapshot().len(), 1);
@@ -470,7 +474,7 @@ mod tests {
             max_files: 5,
         };
         let logger = crate::metrics_log::MetricsLogger::new(&config).unwrap();
-        MetricsStore::with_logger(Duration::from_secs(60), logger)
+        MetricsStore::with_logger(Duration::from_secs(ONE_MINUTE_SECS), logger)
     }
 
     #[test]
@@ -510,7 +514,7 @@ mod tests {
 
     #[test]
     fn percentile_duration() {
-        let store = MetricsStore::new(Duration::from_secs(60));
+        let store = MetricsStore::new(Duration::from_secs(ONE_MINUTE_SECS));
         for ms in [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000] {
             let mut r = sample_record();
             r.duration = Duration::from_millis(ms);
@@ -556,7 +560,7 @@ mod tests {
 
     #[test]
     fn higgs_routing_method_in_record() {
-        let store = MetricsStore::new(Duration::from_secs(60));
+        let store = MetricsStore::new(Duration::from_secs(ONE_MINUTE_SECS));
         let mut rec = sample_record();
         rec.routing_method = RoutingMethod::Higgs;
         store.record(rec);
@@ -566,7 +570,7 @@ mod tests {
 
     #[test]
     fn concurrent_pending_finalize_and_eviction() {
-        let store = Arc::new(MetricsStore::new(Duration::from_secs(60)));
+        let store = Arc::new(MetricsStore::new(Duration::from_secs(ONE_MINUTE_SECS)));
         let iterations: u64 = 200;
 
         let writer_store = Arc::clone(&store);

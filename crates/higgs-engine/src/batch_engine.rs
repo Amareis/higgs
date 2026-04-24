@@ -9,7 +9,10 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use higgs_models::{AnyCache, AnyModel, LogprobArrays, SamplingParams, apply_penalties, sample};
+use higgs_models::{
+    AnyCache, AnyModel, LogprobArrays, SamplingParams, apply_penalties, sample,
+    turboquant::KvCacheConfig,
+};
 use mlx_rs::{
     Array, Stream,
     ops::indexing::{IndexOp, NewAxis},
@@ -83,7 +86,15 @@ pub struct BatchEngine {
 
 impl BatchEngine {
     /// Load a model and start the background processing loop.
-    pub fn load<P: AsRef<Path>>(dir: P) -> Result<Self, EngineError> {
+    pub fn load<P: AsRef<Path>>(
+        dir: P,
+        kv_cache_config: KvCacheConfig,
+    ) -> Result<Self, EngineError> {
+        if kv_cache_config.is_turboquant() {
+            return Err(EngineError::Generation(
+                "TurboQuant is not supported with the batch engine".to_owned(),
+            ));
+        }
         let model_dir = dir.as_ref();
         let model_name = crate::simple::derive_model_name(model_dir);
 
@@ -141,6 +152,16 @@ impl BatchEngine {
     }
 
     /// Apply chat template and tokenize messages.
+    pub fn prepare_chat_prompt_with_thinking(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[serde_json::Value]>,
+        _enable_thinking: bool,
+    ) -> Result<Vec<u32>, EngineError> {
+        self.prepare_chat_prompt(messages, tools)
+    }
+
+    /// Apply chat template and tokenize messages.
     pub fn prepare_chat_prompt(
         &self,
         messages: &[ChatMessage],
@@ -164,6 +185,32 @@ impl BatchEngine {
         stop_sequences: &[String],
         logprobs: bool,
         top_logprobs: Option<u32>,
+        constraint: Option<crate::constrained::ConstrainedGenerator>,
+        pixel_values: Option<mlx_rs::Array>,
+    ) -> Result<GenerationOutput, EngineError> {
+        self.generate_with_thinking(
+            prompt_tokens,
+            max_tokens,
+            params,
+            stop_sequences,
+            logprobs,
+            top_logprobs,
+            false,
+            constraint,
+            pixel_values,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    pub fn generate_with_thinking(
+        &self,
+        prompt_tokens: &[u32],
+        max_tokens: u32,
+        params: &SamplingParams,
+        stop_sequences: &[String],
+        logprobs: bool,
+        top_logprobs: Option<u32>,
+        _enable_thinking: bool,
         constraint: Option<crate::constrained::ConstrainedGenerator>,
         pixel_values: Option<mlx_rs::Array>,
     ) -> Result<GenerationOutput, EngineError> {
@@ -246,6 +293,34 @@ impl BatchEngine {
         logprobs: bool,
         top_logprobs: Option<u32>,
         sender: &tokio::sync::mpsc::Sender<StreamingOutput>,
+        constraint: Option<crate::constrained::ConstrainedGenerator>,
+        pixel_values: Option<mlx_rs::Array>,
+    ) -> Result<(), EngineError> {
+        self.generate_streaming_with_thinking(
+            prompt_tokens,
+            max_tokens,
+            params,
+            stop_sequences,
+            logprobs,
+            top_logprobs,
+            sender,
+            false,
+            constraint,
+            pixel_values,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    pub fn generate_streaming_with_thinking(
+        &self,
+        prompt_tokens: &[u32],
+        max_tokens: u32,
+        params: &SamplingParams,
+        stop_sequences: &[String],
+        logprobs: bool,
+        top_logprobs: Option<u32>,
+        sender: &tokio::sync::mpsc::Sender<StreamingOutput>,
+        _enable_thinking: bool,
         constraint: Option<crate::constrained::ConstrainedGenerator>,
         pixel_values: Option<mlx_rs::Array>,
     ) -> Result<(), EngineError> {
@@ -586,12 +661,18 @@ fn prefill_request(
             if suffix.is_empty() {
                 // Exact prefix match. Currently falls back to full prefill
                 // because we don't store logits alongside the cache.
-                (req.prompt_tokens.clone(), model.make_cache())
+                (
+                    req.prompt_tokens.clone(),
+                    model.make_cache().map_err(EngineError::Mlx)?,
+                )
             } else {
                 (suffix.to_vec(), matched.cache)
             }
         } else {
-            (req.prompt_tokens.clone(), model.make_cache())
+            (
+                req.prompt_tokens.clone(),
+                model.make_cache().map_err(EngineError::Mlx)?,
+            )
         };
 
         let prompt_array = Array::from(actual_tokens.as_slice()).index(NewAxis);
@@ -630,6 +711,7 @@ fn prefill_request(
 
         // Cache the post-prefill state
         prefix_cache.store(&req.prompt_tokens, cache.clone());
+        crate::simple::maybe_clear_mlx_cache("batch_post_prefill");
 
         let first_token_id: u32 = current_token.item();
         let first_token_logprob = first_logprob_data

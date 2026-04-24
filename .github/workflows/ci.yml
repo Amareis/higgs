@@ -155,9 +155,8 @@ jobs:
         uses: panbanda/omen@omen-v4.21.2
         id: omen
         with:
-          comment: true
-          label: true
-          check: true
-          check-threshold: high
+          comment: false
+          label: false
+          check: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -33,6 +33,23 @@ pub struct ChatCompletionRequest {
     pub logprobs: Option<bool>,
     #[serde(default)]
     pub top_logprobs: Option<u32>,
+    /// Optional OpenAI-style reasoning controls.
+    ///
+    /// When omitted, Higgs chooses a model-specific default. Set `effort` to
+    /// a non-empty value such as `"low"` to explicitly enable reasoning.
+    #[serde(default)]
+    pub reasoning: Option<ReasoningConfig>,
+}
+
+/// Optional reasoning controls accepted on chat completion requests.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReasoningConfig {
+    /// Requested reasoning effort level.
+    ///
+    /// Higgs currently treats any non-empty value as an explicit opt-in to the
+    /// model's reasoning / thinking mode and preserves the original string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// Response format specification.
@@ -204,6 +221,9 @@ pub struct ChatCompletionChunk {
     pub created: i64,
     pub model: String,
     pub choices: Vec<ChatCompletionChunkChoice>,
+    /// Optional token usage summary attached to the terminal stream chunk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<CompletionUsage>,
 }
 
 /// A choice in a streaming chunk.
@@ -416,6 +436,7 @@ mod tests {
                 finish_reason,
                 logprobs: None,
             }],
+            usage: None,
         }
     }
 
@@ -448,6 +469,7 @@ mod tests {
         assert_eq!(req.messages.len(), 1);
         assert!(req.stream.is_none());
         assert!(req.max_tokens.is_none());
+        assert!(req.reasoning.is_none());
     }
 
     #[test]
@@ -464,6 +486,21 @@ mod tests {
         let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.max_tokens, Some(100));
         assert!(req.stream == Some(true));
+        assert!(req.reasoning.is_none());
+    }
+
+    #[test]
+    fn test_chat_request_reasoning_deserialization() {
+        let json = r#"{
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning": {"effort": "none"}
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req.reasoning.and_then(|reasoning| reasoning.effort),
+            Some("none".to_owned())
+        );
     }
 
     #[test]

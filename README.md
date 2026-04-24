@@ -30,7 +30,7 @@ higgs serve --model mlx-community/Llama-3.2-1B-Instruct-4bit
 higgs serve --model mlx-community/Llama-3.2-1B-Instruct-4bit --model mlx-community/Qwen3-1.7B-4bit
 ```
 
-Accepts HuggingFace model IDs (resolved from `~/.cache/huggingface/hub/`) or local paths. Prompts to download if not cached. Models must be **MLX safetensors format** from [mlx-community](https://huggingface.co/mlx-community).
+Accepts HuggingFace model IDs (resolved from `~/.cache/huggingface/hub/`) or local paths. Prompts to download if not cached. Models must be **MLX safetensors format** with a supported `config.json` `model_type` (for example from [mlx-community](https://huggingface.co/mlx-community)).
 
 ### Gateway mode (config file)
 
@@ -68,7 +68,7 @@ Each profile gets isolated runtime files (`higgs.<profile>.pid`, `higgs.<profile
 - **Continuous batching** -- 755 tok/s aggregate at 8 concurrent requests
 - **Radix tree prefix cache** -- shared prefix reuse across requests
 - **Vision** -- multimodal image+text (LLaVA-Qwen2)
-- **11 architectures** -- LLaMA, Mistral, Qwen2/3, Qwen3-MoE, Qwen3-Next, Gemma 2, Phi-3, Starcoder2, DeepSeek-V2, LLaVA-Qwen2
+- **13 architecture variants** -- LLaMA, Mistral, Qwen2, Qwen3, Qwen3.5 (dense + MoE), Qwen3-Next, Qwen3-MoE, Gemma 2, Phi-3, Starcoder2, DeepSeek-V2, LLaVA-Qwen2
 
 ### Gateway
 - **Remote providers** -- proxy requests to OpenAI, Anthropic, Ollama, or any OpenAI-compatible API
@@ -94,6 +94,18 @@ Each profile gets isolated runtime files (`higgs.<profile>.pid`, `higgs.<profile
 | `--rate-limit` | `HIGGS_RATE_LIMIT` | `0` | Requests/min per client |
 | `--timeout` | `HIGGS_TIMEOUT` | `300` | Request timeout (seconds) |
 | `--batch` | -- | `false` | Enable continuous batching |
+| `--kv-cache` | -- | `off` | KV cache mode: `off` or `turboquant` |
+| `--kv-bits` | -- | `3` | Default TurboQuant KV bit width |
+| `--kv-key-bits` | -- | `kv-bits - 1` | Override TurboQuant key bit width |
+| `--kv-value-bits` | -- | `kv-bits` | Override TurboQuant value bit width |
+| `--kv-no-norm-correction` | -- | `false` | Disable TurboQuant norm correction |
+| `--kv-adaptive-dense-layers` | -- | `0` | Keep the last N KV cache layers dense |
+| `--kv-seed` | -- | `0` | TurboQuant seed |
+
+Additional simple-mode env toggles:
+- `HIGGS_ENABLE_THINKING=0|1` forces Qwen thinking on or off.
+- `HIGGS_CHUNKED_PREFILL_THRESHOLD` enables chunked prefill above a token threshold.
+- `HIGGS_CHUNKED_PREFILL_CHUNK_SIZE` controls the chunk size used during chunked prefill.
 
 ### Gateway mode (config file)
 
@@ -112,6 +124,13 @@ port = 8000
 path = "mlx-community/Llama-3.2-1B-Instruct-4bit"
 # name = "llama"     # optional friendly name (used as engine key and for auto_router lookup)
 # batch = false
+# kv_cache = "turboquant"
+# kv_bits = 3
+# kv_key_bits = 2
+# kv_value_bits = 3
+# kv_norm_correction = true
+# kv_adaptive_dense_layers = 0
+# kv_seed = 0
 
 # --- Remote providers ---
 [provider.anthropic]
@@ -255,12 +274,16 @@ higgs exec -- aider --model openai/gpt-4o
 
 ## Supported Architectures
 
+Higgs detects support from `config.json` `model_type`. The examples below are representative, not exhaustive.
+
 | Architecture | `model_type` | Examples |
 |---|---|---|
 | LLaMA | `llama` | Llama 3/3.1, CodeLlama |
 | Mistral | `mistral` | Mistral 7B |
 | Qwen2 | `qwen2` | Qwen2, Qwen2.5 |
 | Qwen3 | `qwen3` | Qwen3 |
+| Qwen3.5 (dense) | `qwen3_5` | Qwen3.5 dense MLX checkpoints |
+| Qwen3.5 / Qwen3.6 MoE | `qwen3_5_moe` | Qwen3.5-35B-A3B, Qwen3.6-35B-A3B |
 | Qwen3-Next | `qwen3_next` | Qwen3-Coder (SSM hybrid) |
 | Qwen3-MoE | `qwen3_moe` | Qwen3-30B-A3B (sparse MoE) |
 | Gemma 2 | `gemma2` | Gemma 2 2B/9B/27B |
@@ -268,6 +291,26 @@ higgs exec -- aider --model openai/gpt-4o
 | Starcoder2 | `starcoder2` | Starcoder2 3B/7B/15B |
 | DeepSeek-V2 | `deepseek_v2` | DeepSeek-V2-Lite (MLA + MoE) |
 | LLaVA-Qwen2 | `llava-qwen2` | nanoLLaVA-1.5 (vision) |
+
+### Known Working MLX Examples
+
+These are concrete model IDs that have been used on this branch or are representative of currently supported families:
+
+| Family | Example model IDs |
+|---|---|
+| LLaMA | `mlx-community/Llama-3.2-1B-Instruct-4bit` |
+| Qwen3 | `mlx-community/Qwen3-1.7B-4bit` |
+| Qwen3-Next | `mlx-community/Qwen3-Coder-Next-4bit` |
+| Qwen3.5 dense | `mlx-community/Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-4bit` |
+| Qwen3.5 MoE | `NexVeridian/Qwen3.5-35B-A3B-3bit` |
+| Qwen3.6 MoE | `mlx-community/Qwen3.6-35B-A3B-4bit` |
+| DeepSeek-V2 | `mlx-community/DeepSeek-Coder-V2-Lite-Instruct-4bit-mlx` |
+
+### Notes On Qwen 3.6
+
+- `Qwen3.6` support is included in this branch through the `qwen3_5_moe` loader path.
+- The branch has been smoke-tested against `mlx-community/Qwen3.6-35B-A3B-4bit`.
+- By default, OpenAI-style chat requests now use non-thinking mode for `Qwen3.6` unless the request explicitly opts into reasoning.
 
 ## Performance
 
@@ -289,6 +332,17 @@ Single request, 500 generated tokens, median of 3 runs.
 | DeepSeek-V2-Lite-4bit | 140 | 174 | 99 | -- | -- |
 
 MLX models use 4-bit (8-bit for MoE). llama.cpp/Ollama use Q4_K_M (Q8_0 for MoE).
+
+### MoE prefill (time to first token)
+
+Measured on DeepSeek-V2-Lite-4bit (64 experts, top_k=6). Global batch sort reorders tokens by expert index before `gather_qmm`, giving coalesced GPU memory access.
+
+| Prompt tokens | Before | After | Speedup |
+|---|---|---|---|
+| 59 | 472ms | 227ms | 2.1x |
+| 481 | 3,734ms | 863ms | 4.3x |
+| 1,831 | 14,390ms | 3,123ms | 4.6x |
+| 4,532 | 37,489ms | 8,860ms | 4.2x |
 
 ### Continuous batching (Llama-1B)
 

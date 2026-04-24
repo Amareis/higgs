@@ -359,9 +359,11 @@ pub fn run(
 mod tests {
     use super::*;
 
+    const METRICS_WINDOW_SECS: u64 = 60;
+
     fn make_app() -> App {
         App::new(
-            Arc::new(MetricsStore::new(Duration::from_secs(60))),
+            Arc::new(MetricsStore::new(Duration::from_secs(METRICS_WINDOW_SECS))),
             false,
             None,
         )
@@ -369,7 +371,7 @@ mod tests {
 
     fn make_attached_app() -> App {
         App::new(
-            Arc::new(MetricsStore::new(Duration::from_secs(60))),
+            Arc::new(MetricsStore::new(Duration::from_secs(METRICS_WINDOW_SECS))),
             true,
             None,
         )
@@ -567,6 +569,13 @@ mod tests {
                 path: "mlx-community/Llama-3.2-1B-Instruct-4bit".to_owned(),
                 name: None,
                 batch: false,
+                kv_cache: higgs_models::turboquant::KvCacheMode::Off,
+                kv_bits: 3,
+                kv_seed: 0,
+                kv_key_bits: None,
+                kv_value_bits: None,
+                kv_norm_correction: true,
+                kv_adaptive_dense_layers: 0,
             }],
             ..HiggsConfig::default()
         }

@@ -88,6 +88,10 @@ pub fn render_scrollbar(frame: &mut Frame, area: Rect, total_rows: usize, scroll
 mod tests {
     use super::*;
 
+    const MINUTE_SECS: u64 = 60;
+    const HOUR_SECS: u64 = 60 * 60;
+    const DAY_SECS: u64 = 24 * HOUR_SECS;
+
     #[test]
     fn format_tokens_thresholds() {
         assert_eq!(format_tokens(0), "0");
@@ -114,7 +118,7 @@ mod tests {
     #[test]
     fn format_time_ago_minutes() {
         assert_eq!(
-            format_time_ago(std::time::Duration::from_secs(60)),
+            format_time_ago(std::time::Duration::from_secs(MINUTE_SECS)),
             "1m ago"
         );
         assert_eq!(
@@ -130,11 +134,11 @@ mod tests {
     #[test]
     fn format_time_ago_hours() {
         assert_eq!(
-            format_time_ago(std::time::Duration::from_secs(3600)),
+            format_time_ago(std::time::Duration::from_secs(HOUR_SECS)),
             "1h ago"
         );
         assert_eq!(
-            format_time_ago(std::time::Duration::from_secs(7200)),
+            format_time_ago(std::time::Duration::from_secs(HOUR_SECS * 2)),
             "2h ago"
         );
         assert_eq!(
@@ -158,10 +162,7 @@ mod tests {
 
     #[test]
     fn format_duration_seconds() {
-        assert_eq!(
-            format_duration(std::time::Duration::from_millis(1000)),
-            "1.00s"
-        );
+        assert_eq!(format_duration(std::time::Duration::from_secs(1)), "1.00s");
         assert_eq!(
             format_duration(std::time::Duration::from_millis(1500)),
             "1.50s"
@@ -175,7 +176,7 @@ mod tests {
     #[test]
     fn format_duration_minutes() {
         assert_eq!(
-            format_duration(std::time::Duration::from_secs(60)),
+            format_duration(std::time::Duration::from_secs(MINUTE_SECS)),
             "1m0.0s"
         );
         assert_eq!(
@@ -191,11 +192,11 @@ mod tests {
     #[test]
     fn format_time_ago_days() {
         assert_eq!(
-            format_time_ago(std::time::Duration::from_secs(86400)),
+            format_time_ago(std::time::Duration::from_secs(DAY_SECS)),
             "1d ago"
         );
         assert_eq!(
-            format_time_ago(std::time::Duration::from_secs(172_800)),
+            format_time_ago(std::time::Duration::from_secs(DAY_SECS * 2)),
             "2d ago"
         );
     }

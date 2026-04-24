@@ -152,6 +152,8 @@ mod tests {
     use super::*;
     use std::fs;
 
+    const HISTORY_WINDOW_SECS: u64 = 60 * 60;
+
     fn recent_timestamp() -> String {
         Utc::now().to_rfc3339()
     }
@@ -274,7 +276,7 @@ mod tests {
             max_size_mb: 50,
             max_files: 5,
         };
-        let store = MetricsStore::new(Duration::from_secs(3600));
+        let store = MetricsStore::new(Duration::from_secs(HISTORY_WINDOW_SECS));
         load_history(&config, &store);
 
         let snap = store.snapshot();
@@ -304,7 +306,7 @@ mod tests {
             max_size_mb: 50,
             max_files: 5,
         };
-        let store = MetricsStore::new(Duration::from_secs(3600));
+        let store = MetricsStore::new(Duration::from_secs(HISTORY_WINDOW_SECS));
         load_history(&config, &store);
 
         let snap = store.snapshot();
@@ -331,7 +333,7 @@ mod tests {
             max_size_mb: 50,
             max_files: 5,
         };
-        let store = MetricsStore::new(Duration::from_secs(3600));
+        let store = MetricsStore::new(Duration::from_secs(HISTORY_WINDOW_SECS));
         load_history(&config, &store);
 
         let snap = store.snapshot();
@@ -349,7 +351,7 @@ mod tests {
             max_size_mb: 50,
             max_files: 5,
         };
-        let store = MetricsStore::new(Duration::from_secs(3600));
+        let store = MetricsStore::new(Duration::from_secs(HISTORY_WINDOW_SECS));
         load_history(&config, &store);
 
         assert_eq!(store.snapshot().len(), 0);

@@ -11,7 +11,7 @@ pub fn draw(frame: &mut Frame, area: Rect, metrics: &Arc<MetricsStore>, scroll: 
 
     let now = std::time::Instant::now();
     let mut errors: Vec<_> = snap.iter().filter(|r| r.status >= 400).collect();
-    errors.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    errors.sort_by_key(|record| std::cmp::Reverse(record.timestamp));
 
     let header = Row::new(vec!["Age", "Model", "Provider", "Status", "Error"])
         .style(Style::default().add_modifier(Modifier::BOLD));
@@ -71,6 +71,8 @@ mod tests {
 
     use crate::metrics::{MetricsStore, RequestRecord, RoutingMethod};
 
+    const METRICS_WINDOW_SECS: u64 = 60 * 60;
+
     fn sample_record() -> RequestRecord {
         RequestRecord {
             id: 0,
@@ -89,7 +91,7 @@ mod tests {
 
     #[test]
     fn draw_no_errors() {
-        let metrics = Arc::new(MetricsStore::new(Duration::from_secs(3600)));
+        let metrics = Arc::new(MetricsStore::new(Duration::from_secs(METRICS_WINDOW_SECS)));
         metrics.record(sample_record());
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -109,7 +111,7 @@ mod tests {
 
     #[test]
     fn draw_with_errors() {
-        let metrics = Arc::new(MetricsStore::new(Duration::from_secs(3600)));
+        let metrics = Arc::new(MetricsStore::new(Duration::from_secs(METRICS_WINDOW_SECS)));
         let mut error_rec = sample_record();
         error_rec.status = 500;
         error_rec.error_body = Some("Internal server error".to_owned());

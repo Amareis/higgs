@@ -109,6 +109,8 @@ mod tests {
 
     use crate::metrics::{MetricsStore, RequestRecord, RoutingMethod};
 
+    const METRICS_WINDOW_SECS: u64 = 60 * 60;
+
     fn sample_record() -> RequestRecord {
         RequestRecord {
             id: 0,
@@ -127,7 +129,7 @@ mod tests {
 
     #[test]
     fn draw_empty_metrics_no_panic() {
-        let metrics = Arc::new(MetricsStore::new(Duration::from_secs(3600)));
+        let metrics = Arc::new(MetricsStore::new(Duration::from_secs(METRICS_WINDOW_SECS)));
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
@@ -139,7 +141,7 @@ mod tests {
 
     #[test]
     fn draw_with_records_contains_provider() {
-        let metrics = Arc::new(MetricsStore::new(Duration::from_secs(3600)));
+        let metrics = Arc::new(MetricsStore::new(Duration::from_secs(METRICS_WINDOW_SECS)));
         metrics.record(sample_record());
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -162,7 +164,7 @@ mod tests {
 
     #[test]
     fn draw_shows_configured_zero_traffic_providers() {
-        let metrics = Arc::new(MetricsStore::new(Duration::from_secs(3600)));
+        let metrics = Arc::new(MetricsStore::new(Duration::from_secs(METRICS_WINDOW_SECS)));
         let configured = vec!["openai".to_owned(), "ollama".to_owned()];
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();

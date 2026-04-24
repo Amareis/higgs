@@ -71,6 +71,25 @@ fn model_label(model: &crate::config::ModelConfig) -> String {
 fn check_models(config: &HiggsConfig, result: &mut DoctorResult) {
     for model in &config.models {
         let label = model_label(model);
+        match model.kv_cache_config().validate() {
+            Ok(()) => {}
+            Err(err) => {
+                fail(
+                    &format!("model {label} has invalid KV cache config: {err}"),
+                    result,
+                );
+                continue;
+            }
+        }
+        if model.batch && model.kv_cache_config().is_turboquant() {
+            fail(
+                &format!(
+                    "model {label} enables unsupported combination: TurboQuant with batch=true"
+                ),
+                result,
+            );
+            continue;
+        }
         match model_resolver::resolve(&model.path) {
             Ok(_) => pass(&format!("model {label} resolvable"), result),
             Err(err) => fail(&format!("model {label} not found: {err}"), result),
@@ -337,11 +356,25 @@ mod tests {
                     path: "org/model-a".to_owned(),
                     name: None,
                     batch: false,
+                    kv_cache: higgs_models::turboquant::KvCacheMode::Off,
+                    kv_bits: 3,
+                    kv_seed: 0,
+                    kv_key_bits: None,
+                    kv_value_bits: None,
+                    kv_norm_correction: true,
+                    kv_adaptive_dense_layers: 0,
                 },
                 ModelConfig {
                     path: "org/model-b".to_owned(),
                     name: None,
                     batch: false,
+                    kv_cache: higgs_models::turboquant::KvCacheMode::Off,
+                    kv_bits: 3,
+                    kv_seed: 0,
+                    kv_key_bits: None,
+                    kv_value_bits: None,
+                    kv_norm_correction: true,
+                    kv_adaptive_dense_layers: 0,
                 },
             ],
             ..HiggsConfig::default()
@@ -360,11 +393,25 @@ mod tests {
                     path: "org/model-a".to_owned(),
                     name: None,
                     batch: false,
+                    kv_cache: higgs_models::turboquant::KvCacheMode::Off,
+                    kv_bits: 3,
+                    kv_seed: 0,
+                    kv_key_bits: None,
+                    kv_value_bits: None,
+                    kv_norm_correction: true,
+                    kv_adaptive_dense_layers: 0,
                 },
                 ModelConfig {
                     path: "org/model-a".to_owned(),
                     name: None,
                     batch: false,
+                    kv_cache: higgs_models::turboquant::KvCacheMode::Off,
+                    kv_bits: 3,
+                    kv_seed: 0,
+                    kv_key_bits: None,
+                    kv_value_bits: None,
+                    kv_norm_correction: true,
+                    kv_adaptive_dense_layers: 0,
                 },
             ],
             ..HiggsConfig::default()
@@ -613,6 +660,13 @@ mod tests {
                 path: "org/other-model".to_owned(),
                 name: None,
                 batch: false,
+                kv_cache: higgs_models::turboquant::KvCacheMode::Off,
+                kv_bits: 3,
+                kv_seed: 0,
+                kv_key_bits: None,
+                kv_value_bits: None,
+                kv_norm_correction: true,
+                kv_adaptive_dense_layers: 0,
             }],
             ..HiggsConfig::default()
         };
@@ -635,6 +689,13 @@ mod tests {
                 path: "org/router-model".to_owned(),
                 name: None,
                 batch: false,
+                kv_cache: higgs_models::turboquant::KvCacheMode::Off,
+                kv_bits: 3,
+                kv_seed: 0,
+                kv_key_bits: None,
+                kv_value_bits: None,
+                kv_norm_correction: true,
+                kv_adaptive_dense_layers: 0,
             }],
             ..HiggsConfig::default()
         };
@@ -659,6 +720,13 @@ mod tests {
                 path: "org/router-model".to_owned(),
                 name: None,
                 batch: false,
+                kv_cache: higgs_models::turboquant::KvCacheMode::Off,
+                kv_bits: 3,
+                kv_seed: 0,
+                kv_key_bits: None,
+                kv_value_bits: None,
+                kv_norm_correction: true,
+                kv_adaptive_dense_layers: 0,
             }],
             routes: vec![RouteConfig {
                 name: Some("test".to_owned()),

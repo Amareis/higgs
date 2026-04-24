@@ -2,10 +2,10 @@ use std::fs;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 
-use nix::sys::signal::{Signal, kill};
+use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, kill, sigaction};
 use nix::unistd::Pid;
 
 use crate::attach;
@@ -19,6 +19,15 @@ fn pid_path(profile: Option<&str>) -> std::path::PathBuf {
 
 fn log_path(profile: Option<&str>) -> std::path::PathBuf {
     config::log_path(profile)
+}
+
+static EXEC_CHILD_PID: AtomicI32 = AtomicI32::new(0);
+static EXEC_SIGINT_RECEIVED: AtomicBool = AtomicBool::new(false);
+const EVICTION_INTERVAL_SECS: u64 = 60;
+const DEFAULT_RETENTION_SECS: u64 = 365 * 24 * 60 * 60;
+
+extern "C" fn exec_sigint_handler(_: i32) {
+    EXEC_SIGINT_RECEIVED.store(true, Ordering::SeqCst);
 }
 
 pub fn read_pid(profile: Option<&str>) -> Option<i32> {
@@ -214,7 +223,7 @@ pub fn cmd_shellenv(config: &HiggsConfig) {
 /// Spawn a command with `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` pointing at the Higgs server.
 ///
 /// Forwards signals to the child and exits with its status. Never returns.
-#[allow(clippy::print_stderr)]
+#[allow(clippy::print_stderr, unsafe_code)]
 pub fn cmd_exec(config: &HiggsConfig, command: &[String]) -> ! {
     let Some((program, args)) = command.split_first() else {
         eprintln!("no command specified");
@@ -253,24 +262,42 @@ pub fn cmd_exec(config: &HiggsConfig, command: &[String]) -> ! {
         std::process::exit(1);
     };
     let child_pid = nix::unistd::Pid::from_raw(child_pid_raw);
+    EXEC_CHILD_PID.store(child_pid_raw, Ordering::SeqCst);
+    EXEC_SIGINT_RECEIVED.store(false, Ordering::SeqCst);
 
-    // Forward Ctrl+C (SIGINT) to child as SIGTERM, then wait for it to exit.
-    ctrlc::set_handler(move || {
-        let _ = nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGTERM);
-    })
-    .unwrap_or_else(|e| eprintln!("warning: failed to set signal handler: {e}"));
+    // Forward SIGINT (Ctrl+C) to the child as SIGTERM so wrappers like
+    // `sleep` terminate cleanly and we preserve the child's exit status.
+    let action = SigAction::new(
+        SigHandler::Handler(exec_sigint_handler),
+        SaFlags::empty(),
+        SigSet::empty(),
+    );
+    if let Err(e) = unsafe { sigaction(Signal::SIGINT, &action) } {
+        eprintln!("warning: failed to set SIGINT handler: {e}");
+    }
 
-    let status = match child.wait() {
-        Ok(s) => s.code().unwrap_or_else(|| {
-            // Child killed by signal -- use the Unix convention of 128 + signal.
-            use std::os::unix::process::ExitStatusExt;
-            s.signal().map_or(1, |sig| 128 + sig)
-        }),
-        Err(e) => {
-            eprintln!("failed to wait for '{program}': {e}");
-            1
+    let status = loop {
+        if EXEC_SIGINT_RECEIVED.swap(false, Ordering::SeqCst) {
+            let _ = nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGTERM);
+        }
+
+        match child.try_wait() {
+            Ok(Some(s)) => {
+                use std::os::unix::process::ExitStatusExt;
+
+                break s.code().unwrap_or_else(|| {
+                    // Child killed by signal -- use the Unix convention of 128 + signal.
+                    s.signal().map_or(1, |sig| 128 + sig)
+                });
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(e) => {
+                eprintln!("failed to wait for '{program}': {e}");
+                break 1;
+            }
         }
     };
+    EXEC_CHILD_PID.store(0, Ordering::SeqCst);
     std::process::exit(status);
 }
 
@@ -427,7 +454,7 @@ pub fn run_attached(config: &HiggsConfig, profile: Option<&str>) {
     let evict_stop = Arc::clone(&stop);
     let _evict_handle = std::thread::spawn(move || {
         while !evict_stop.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_secs(60));
+            std::thread::sleep(Duration::from_secs(EVICTION_INTERVAL_SECS));
             evict_metrics.evict_expired();
         }
     });
@@ -448,7 +475,7 @@ pub const fn retention_duration(config: &HiggsConfig) -> Duration {
     if config.retention.enabled {
         Duration::from_secs(config.retention.minutes.saturating_mul(60))
     } else {
-        Duration::from_secs(365 * 24 * 60 * 60)
+        Duration::from_secs(DEFAULT_RETENTION_SECS)
     }
 }
 
@@ -473,7 +500,7 @@ pub fn create_metrics(config: &HiggsConfig) -> Arc<MetricsStore> {
 pub fn spawn_eviction_task(metrics: &Arc<MetricsStore>) {
     let evict_metrics = Arc::clone(metrics);
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let mut interval = tokio::time::interval(Duration::from_secs(EVICTION_INTERVAL_SECS));
         loop {
             interval.tick().await;
             evict_metrics.evict_expired();
@@ -498,8 +525,17 @@ pub async fn await_shutdown_signal() {
 #[allow(clippy::panic, clippy::unwrap_used, unsafe_code)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn config_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn with_temp_config_dir<F: FnOnce(&std::path::Path)>(f: F) {
+        let _guard = config_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("HIGGS_CONFIG_DIR", dir.path());
@@ -512,6 +548,9 @@ mod tests {
 
     #[test]
     fn config_dir_respects_env_override() {
+        let _guard = config_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("HIGGS_CONFIG_DIR", dir.path());
@@ -524,6 +563,9 @@ mod tests {
 
     #[test]
     fn config_dir_falls_back_to_home() {
+        let _guard = config_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe {
             std::env::remove_var("HIGGS_CONFIG_DIR");
         }
@@ -630,7 +672,10 @@ mod tests {
             },
             ..HiggsConfig::default()
         };
-        assert_eq!(retention_duration(&config), Duration::from_secs(1800));
+        assert_eq!(
+            retention_duration(&config),
+            Duration::from_secs(config.retention.minutes.saturating_mul(60))
+        );
     }
 
     #[test]
@@ -644,7 +689,7 @@ mod tests {
         };
         assert_eq!(
             retention_duration(&config),
-            Duration::from_secs(365 * 24 * 60 * 60)
+            Duration::from_secs(DEFAULT_RETENTION_SECS)
         );
     }
 

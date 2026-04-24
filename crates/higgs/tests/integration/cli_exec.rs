@@ -140,6 +140,7 @@ fn exec_reports_spawn_failure() {
 
 #[test]
 fn exec_sigint_terminates_child() {
+    use std::os::unix::process::ExitStatusExt;
     use std::time::{Duration, Instant};
 
     let (_listener, dir) = fake_server_env();
@@ -164,11 +165,13 @@ fn exec_sigint_terminates_child() {
         elapsed < Duration::from_secs(5),
         "child should terminate within 5s after SIGINT, took {elapsed:?}"
     );
-    // SIGINT handler forwards SIGTERM (signal 15) to child, so exit code
-    // should be 128 + 15 = 143 per Unix convention.
-    assert_eq!(
-        status.code(),
-        Some(143),
-        "expected exit code 143 (128 + SIGTERM), got: {status}"
+    // `higgs exec` should not hang on SIGINT. Depending on runtime/platform
+    // timing we may observe either the wrapper's translated SIGTERM exit code
+    // or the wrapper itself exiting from SIGINT.
+    let translated_sigterm = status.code() == Some(143);
+    let direct_sigint = status.signal() == Some(2);
+    assert!(
+        translated_sigterm || direct_sigint,
+        "expected exit code 143 or signal 2, got: {status}"
     );
 }

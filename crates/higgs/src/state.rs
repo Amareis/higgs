@@ -8,6 +8,7 @@ use higgs_engine::error::EngineError;
 use higgs_engine::simple::SimpleEngine;
 use higgs_engine::tokenizers::Tokenizer;
 use higgs_models::SamplingParams;
+use higgs_models::turboquant::KvCacheConfig;
 use mlx_rs::Array;
 
 use crate::config::HiggsConfig;
@@ -24,12 +25,18 @@ pub enum Engine {
 }
 
 impl Engine {
-    pub fn load_simple<P: AsRef<Path>>(dir: P) -> Result<Self, EngineError> {
-        SimpleEngine::load(dir).map(|e| Self::Simple(Box::new(e)))
+    pub fn load_simple<P: AsRef<Path>>(
+        dir: P,
+        kv_cache_config: KvCacheConfig,
+    ) -> Result<Self, EngineError> {
+        SimpleEngine::load(dir, kv_cache_config).map(|e| Self::Simple(Box::new(e)))
     }
 
-    pub fn load_batch<P: AsRef<Path>>(dir: P) -> Result<Self, EngineError> {
-        BatchEngine::load(dir).map(|e| Self::Batch(Box::new(e)))
+    pub fn load_batch<P: AsRef<Path>>(
+        dir: P,
+        kv_cache_config: KvCacheConfig,
+    ) -> Result<Self, EngineError> {
+        BatchEngine::load(dir, kv_cache_config).map(|e| Self::Batch(Box::new(e)))
     }
 
     #[cfg(test)]
@@ -74,6 +81,15 @@ impl Engine {
         }
     }
 
+    pub fn enable_thinking(&self) -> bool {
+        match self {
+            Self::Simple(e) => e.enable_thinking(),
+            Self::Batch(_) => false,
+            #[cfg(test)]
+            Self::Stub(_) => false,
+        }
+    }
+
     pub fn is_vlm(&self) -> bool {
         match self {
             Self::Simple(e) => e.is_vlm(),
@@ -114,6 +130,22 @@ impl Engine {
         }
     }
 
+    pub fn prepare_chat_prompt_with_thinking(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[serde_json::Value]>,
+        enable_thinking: bool,
+    ) -> Result<Vec<u32>, EngineError> {
+        match self {
+            Self::Simple(e) => {
+                e.prepare_chat_prompt_with_thinking(messages, tools, enable_thinking)
+            }
+            Self::Batch(e) => e.prepare_chat_prompt_with_thinking(messages, tools, enable_thinking),
+            #[cfg(test)]
+            Self::Stub(_) => Ok(Vec::new()),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn generate(
         &self,
@@ -126,24 +158,52 @@ impl Engine {
         constraint: Option<higgs_engine::constrained::ConstrainedGenerator>,
         pixel_values: Option<Array>,
     ) -> Result<GenerationOutput, EngineError> {
+        self.generate_with_thinking(
+            prompt_tokens,
+            max_tokens,
+            params,
+            stop_sequences,
+            logprobs,
+            top_logprobs,
+            self.enable_thinking(),
+            constraint,
+            pixel_values,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_with_thinking(
+        &self,
+        prompt_tokens: &[u32],
+        max_tokens: u32,
+        params: &SamplingParams,
+        stop_sequences: &[String],
+        logprobs: bool,
+        top_logprobs: Option<u32>,
+        enable_thinking: bool,
+        constraint: Option<higgs_engine::constrained::ConstrainedGenerator>,
+        pixel_values: Option<Array>,
+    ) -> Result<GenerationOutput, EngineError> {
         match self {
-            Self::Simple(e) => e.generate(
+            Self::Simple(e) => e.generate_with_thinking(
                 prompt_tokens,
                 max_tokens,
                 params,
                 stop_sequences,
                 logprobs,
                 top_logprobs,
+                enable_thinking,
                 constraint,
                 pixel_values,
             ),
-            Self::Batch(e) => e.generate(
+            Self::Batch(e) => e.generate_with_thinking(
                 prompt_tokens,
                 max_tokens,
                 params,
                 stop_sequences,
                 logprobs,
                 top_logprobs,
+                enable_thinking,
                 constraint,
                 pixel_values,
             ),
@@ -165,8 +225,36 @@ impl Engine {
         constraint: Option<higgs_engine::constrained::ConstrainedGenerator>,
         pixel_values: Option<Array>,
     ) -> Result<(), EngineError> {
+        self.generate_streaming_with_thinking(
+            prompt_tokens,
+            max_tokens,
+            params,
+            stop_sequences,
+            logprobs,
+            top_logprobs,
+            sender,
+            self.enable_thinking(),
+            constraint,
+            pixel_values,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_streaming_with_thinking(
+        &self,
+        prompt_tokens: &[u32],
+        max_tokens: u32,
+        params: &SamplingParams,
+        stop_sequences: &[String],
+        logprobs: bool,
+        top_logprobs: Option<u32>,
+        sender: &tokio::sync::mpsc::Sender<StreamingOutput>,
+        enable_thinking: bool,
+        constraint: Option<higgs_engine::constrained::ConstrainedGenerator>,
+        pixel_values: Option<Array>,
+    ) -> Result<(), EngineError> {
         match self {
-            Self::Simple(e) => e.generate_streaming(
+            Self::Simple(e) => e.generate_streaming_with_thinking(
                 prompt_tokens,
                 max_tokens,
                 params,
@@ -174,10 +262,11 @@ impl Engine {
                 logprobs,
                 top_logprobs,
                 sender,
+                enable_thinking,
                 constraint,
                 pixel_values,
             ),
-            Self::Batch(e) => e.generate_streaming(
+            Self::Batch(e) => e.generate_streaming_with_thinking(
                 prompt_tokens,
                 max_tokens,
                 params,
@@ -185,6 +274,7 @@ impl Engine {
                 logprobs,
                 top_logprobs,
                 sender,
+                enable_thinking,
                 constraint,
                 pixel_values,
             ),

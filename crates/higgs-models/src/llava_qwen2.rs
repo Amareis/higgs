@@ -94,6 +94,16 @@ impl LlavaQwen2Model {
         self.language_model.args.num_hidden_layers
     }
 
+    /// Number of KV heads used by the language model.
+    pub(crate) const fn num_key_value_heads(&self) -> i32 {
+        self.language_model.args.num_key_value_heads
+    }
+
+    /// Attention head dimension used by the language model KV cache.
+    pub(crate) fn head_dim(&self) -> Result<i32, crate::error::ModelError> {
+        self.language_model.args.checked_head_dim()
+    }
+
     /// Get the image size expected by the vision encoder.
     pub const fn image_size(&self) -> i32 {
         self.image_size

@@ -21,8 +21,8 @@ use crate::{
     cache::{KeyValueCache, SteppingKeyValueCache},
     error::ModelError,
     utils::{
-        AttentionMask, apply_rope, create_attention_mask, create_batched_decode_mask,
-        scaled_dot_product_attention,
+        AttentionMask, apply_rope, cached_scaled_dot_product_attention, create_attention_mask,
+        create_batched_decode_mask, scaled_dot_product_attention,
     },
 };
 
@@ -270,7 +270,7 @@ where
 
         queries = queries.transpose_axes(&[0, 2, 1, 3])?;
         keys = keys.transpose_axes(&[0, 2, 1, 3])?;
-        let mut values = v_raw
+        let values = v_raw
             .reshape(&[B, L, self.n_kv_heads, -1])?
             .transpose_axes(&[0, 2, 1, 3])?;
 
@@ -278,13 +278,16 @@ where
             queries = apply_rope(&queries, &self.rope, kv_cache.offset())?;
             keys = apply_rope(&keys, &self.rope, kv_cache.offset())?;
 
-            let (cached_keys, cached_values) = kv_cache.update_and_fetch(keys, values)?;
-            keys = cached_keys;
-            values = cached_values;
-        } else {
-            queries = apply_rope(&queries, &self.rope, 0)?;
-            keys = apply_rope(&keys, &self.rope, 0)?;
+            let output = cached_scaled_dot_product_attention(
+                queries, kv_cache, keys, values, self.scale, mask,
+            )?
+            .transpose_axes(&[0, 2, 1, 3])?
+            .reshape(&[B, L, -1])?;
+
+            return self.o_proj.forward(&output);
         }
+        queries = apply_rope(&queries, &self.rope, 0)?;
+        keys = apply_rope(&keys, &self.rope, 0)?;
 
         let output = scaled_dot_product_attention(queries, keys, values, self.scale, mask)?
             .transpose_axes(&[0, 2, 1, 3])?
@@ -593,8 +596,9 @@ impl Model {
         mask: Option<&Array>,
         kv_cache: &mut Vec<Option<C>>,
     ) -> Result<Array, Exception> {
-        let out = self.forward_hidden(inputs, mask, kv_cache)?;
-        self.apply_lm_head(&out)
+        let hidden = self.forward_hidden(inputs, mask, kv_cache)?;
+        let last = hidden.index((.., -1.., ..));
+        self.apply_lm_head(&last)
     }
 
     /// Get the hidden size.
@@ -826,13 +830,20 @@ impl Model {
         self.apply_lm_head(&out)
     }
 
-    /// Apply the LM head to hidden states.
+    /// Apply the LM head to hidden states (last position only during prefill).
+    #[allow(non_snake_case)]
     fn apply_lm_head(&mut self, hidden: &Array) -> Result<Array, Exception> {
+        let t = hidden.shape().get(1).copied().unwrap_or(1);
+        let lm_input = if t > 1 {
+            hidden.index((.., -1.., ..))
+        } else {
+            hidden.clone()
+        };
         match self.lm_head.as_mut() {
-            Some(head) => head.forward(hidden),
+            Some(head) => head.forward(&lm_input),
             None => match &mut self.model.embed_tokens {
-                MaybeQuantized::Original(embed) => embed.as_linear(hidden),
-                MaybeQuantized::Quantized(q_embed) => q_embed.as_linear(hidden),
+                MaybeQuantized::Original(embed) => embed.as_linear(&lm_input),
+                MaybeQuantized::Quantized(q_embed) => q_embed.as_linear(&lm_input),
             },
         }
     }
