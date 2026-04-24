@@ -11,7 +11,7 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::OnceLock;
 
 use mlx_rs::{Array, Dtype, Stream, argmin_axis, error::Exception, ops};
-use rand::{RngExt, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 const ONE_BIT_CENTROIDS: [f32; 2] = [-0.797_884_6, 0.797_884_6];
