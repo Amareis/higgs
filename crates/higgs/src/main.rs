@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::fs;
 use std::io::IsTerminal;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -8,7 +10,10 @@ use higgs_engine::mlx_tuning::resolve_runtime_tuning;
 
 use higgs::{
     build_router,
-    config::{self, Cli, Commands, ConfigAction, HiggsConfig, MetricsLogConfig, ServeArgs},
+    config::{
+        self, Cli, Commands, ConfigAction, HiggsConfig, MetricsLogConfig, ServeArgs, StartArgs,
+        StopArgs,
+    },
     model_download, model_resolver,
     router::Router,
     state::{AppState, Engine},
@@ -26,13 +31,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::Serve(ref args) => cmd_serve(&cli, args).await,
-        Commands::Start(ref _args) => {
+        Commands::Start(ref args) => {
+            reject_legacy_start_flags(args)?;
             let config_path = resolve_config_path(&cli)?;
             higgs::daemon::detach(&config_path, cli.verbose, profile);
             Ok(())
         }
-        Commands::Stop => {
-            higgs::daemon::cmd_stop(profile);
+        Commands::Stop(StopArgs { force }) => {
+            let exit_code = higgs::daemon::cmd_stop(profile, force);
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
             Ok(())
         }
         Commands::Attach => {
@@ -45,12 +54,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Commands::Shellenv => {
-            let config = load_config_for_command(&cli).unwrap_or_default();
-            higgs::daemon::cmd_shellenv(&config);
+            let config = load_config_for_command(&cli)?;
+            higgs::daemon::cmd_shellenv(&config)?;
             Ok(())
         }
         Commands::Exec { ref command } => {
-            let config = load_config_for_command(&cli).unwrap_or_default();
+            let config = load_config_for_command(&cli)?;
             higgs::daemon::cmd_exec(&config, command);
         }
         Commands::Config { ref action } => {
@@ -81,6 +90,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
     }
+}
+
+fn reject_legacy_start_flags(args: &StartArgs) -> Result<(), Box<dyn std::error::Error>> {
+    if args.uses_serve_flags() {
+        return Err(
+            "higgs start is config/profile-only\nhint: use 'higgs serve' for ad hoc --model/--port/--batch flags"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 /// Resolve a config file path from CLI args, profile, or the default location.
@@ -154,6 +173,14 @@ async fn cmd_serve(cli: &Cli, args: &ServeArgs) -> Result<(), Box<dyn std::error
         }
     }
 
+    ensure_local_runtime_ready(&higgs_config)?;
+    if higgs_config.local.raise_wired_limit && higgs_config.models.len() > 1 {
+        tracing::warn!(
+            model_count = higgs_config.models.len(),
+            "MLX wired-limit escalation is enabled with multiple resident local models; unified-memory pressure may spike"
+        );
+    }
+
     // Load all local models and build router
     let engines = load_engines(&higgs_config)?;
     let router = Router::from_config(&higgs_config, engines)?;
@@ -166,6 +193,7 @@ async fn cmd_serve(cli: &Cli, args: &ServeArgs) -> Result<(), Box<dyn std::error
 
     let api_key = higgs_config.server.api_key.clone();
     let rate_limit = higgs_config.server.rate_limit;
+    let max_body_size = higgs_config.server.max_body_size;
     let bind_addr = format!("{}:{}", higgs_config.server.host, higgs_config.server.port);
 
     // Create metrics (config mode only)
@@ -187,7 +215,13 @@ async fn cmd_serve(cli: &Cli, args: &ServeArgs) -> Result<(), Box<dyn std::error
     });
 
     // Build router with middleware
-    let app = build_router(shared_state, timeout_secs, api_key, rate_limit);
+    let app = build_router(
+        shared_state,
+        timeout_secs,
+        api_key,
+        rate_limit,
+        max_body_size,
+    );
 
     // Start server
     tracing::info!(addr = %bind_addr, "Starting server");
@@ -249,13 +283,24 @@ fn load_engines(
         };
 
         tracing::info!(model = %model_path, resolved = %resolved.display(), "Loading model");
+        if model_cfg.batch && !config::resolved_model_supports_batch(&resolved)? {
+            return Err(format!(
+                "batch=true is only supported for transformer models (llama, mistral, qwen2, qwen3); {model_path} is not supported"
+            )
+            .into());
+        }
         let kv_cache_config = model_cfg.kv_cache_config();
         let engine = if model_cfg.batch {
-            Engine::load_batch(&resolved, kv_cache_config)?
+            Engine::load_batch(&resolved, kv_cache_config, config.local.raise_wired_limit)?
         } else {
             let tuning =
                 resolve_runtime_tuning(&resolved, model_cfg.requested_mlx_profile(&config.local));
-            Engine::load_simple(&resolved, kv_cache_config, tuning)?
+            Engine::load_simple(
+                &resolved,
+                kv_cache_config,
+                tuning,
+                config.local.raise_wired_limit,
+            )?
         };
         let name = model_cfg
             .name
@@ -272,6 +317,77 @@ fn load_engines(
     }
 
     Ok(engines)
+}
+
+fn ensure_local_runtime_ready(config: &HiggsConfig) -> Result<(), Box<dyn std::error::Error>> {
+    if config.models.is_empty() {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let exe = std::env::current_exe()?;
+        let metallib = exe.with_file_name("mlx.metallib");
+        if !metallib.exists() {
+            try_restore_metallib(&exe, &metallib)?;
+        }
+        if !metallib.exists() {
+            return Err(format!(
+                "mlx.metallib not found next to executable at {}\nhint: rebuild Higgs or use a release artifact that bundles mlx.metallib",
+                metallib.display()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn try_restore_metallib(exe: &Path, destination: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(profile_dir) = derive_profile_dir(exe) else {
+        return Ok(());
+    };
+    let Some(source) = newest_metallib_candidate(&profile_dir) else {
+        return Ok(());
+    };
+    fs::copy(&source, destination)?;
+    tracing::info!(
+        source = %source.display(),
+        destination = %destination.display(),
+        "restored mlx.metallib next to executable from Cargo build output"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn derive_profile_dir(exe: &Path) -> Option<PathBuf> {
+    let parent = exe.parent()?;
+    if parent.file_name().is_some_and(|name| name == "deps") {
+        parent.parent().map(Path::to_path_buf)
+    } else {
+        Some(parent.to_path_buf())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn newest_metallib_candidate(profile_dir: &Path) -> Option<PathBuf> {
+    let build_dir = profile_dir.join("build");
+    let entries = fs::read_dir(build_dir).ok()?;
+    let mut candidates: Vec<PathBuf> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let is_mlx_sys = name
+                .to_str()
+                .is_some_and(|value| value.starts_with("mlx-sys-"));
+            if !is_mlx_sys {
+                return None;
+            }
+            let candidate = entry.path().join("out/build/lib/mlx.metallib");
+            candidate.exists().then_some(candidate)
+        })
+        .collect();
+    candidates.sort_by_key(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok());
+    candidates.pop()
 }
 
 fn cmd_config(cli: &Cli, action: &ConfigAction) {

@@ -57,6 +57,13 @@ fn draw_auto_router(frame: &mut Frame, area: Rect, config: &TuiConfig) {
                 Style::default().fg(Color::White),
             ),
         ]),
+        Line::from(vec![
+            Span::raw("  Precedence: "),
+            Span::styled(
+                "auto -> exact local model -> regex route -> default",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
     ];
 
     let widget = Paragraph::new(lines).block(
@@ -69,8 +76,15 @@ fn draw_auto_router(frame: &mut Frame, area: Rect, config: &TuiConfig) {
 
 #[allow(clippy::indexing_slicing)]
 fn draw_routes_table(frame: &mut Frame, area: Rect, config: &TuiConfig) {
-    let header = Row::new(vec!["#", "Pattern", "Provider", "Rewrite", "Name"])
-        .style(Style::default().add_modifier(Modifier::BOLD));
+    let header = Row::new(vec![
+        "#",
+        "Pattern",
+        "Provider",
+        "Rewrite",
+        "Name",
+        "Description",
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD));
 
     let mut rows: Vec<Row> = config
         .routes
@@ -81,6 +95,7 @@ fn draw_routes_table(frame: &mut Frame, area: Rect, config: &TuiConfig) {
             let pattern = route.pattern.as_deref().unwrap_or("-");
             let rewrite = route.model_rewrite.as_deref().unwrap_or("-");
             let name = route.name.as_deref().unwrap_or("-");
+            let description = route.description.as_deref().unwrap_or("-");
 
             let provider_style = if route.provider == "higgs" {
                 Style::default().fg(Color::Magenta)
@@ -94,6 +109,7 @@ fn draw_routes_table(frame: &mut Frame, area: Rect, config: &TuiConfig) {
                 Cell::from(route.provider.clone()).style(provider_style),
                 Cell::from(rewrite.to_owned()),
                 Cell::from(name.to_owned()),
+                Cell::from(description.to_owned()).style(Style::default().fg(Color::DarkGray)),
             ])
         })
         .collect();
@@ -111,6 +127,7 @@ fn draw_routes_table(frame: &mut Frame, area: Rect, config: &TuiConfig) {
         Cell::from(config.default_provider.clone()).style(default_provider_style),
         Cell::from("-").style(default_style),
         Cell::from("-").style(default_style),
+        Cell::from("-").style(default_style),
     ]));
 
     let table = Table::new(
@@ -121,13 +138,14 @@ fn draw_routes_table(frame: &mut Frame, area: Rect, config: &TuiConfig) {
             Constraint::Length(15),
             Constraint::Length(15),
             Constraint::Length(15),
+            Constraint::Min(20),
         ],
     )
     .header(header)
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Routes (first match wins) "),
+            .title(" Routes (local exact match beats regex) "),
     );
 
     frame.render_widget(table, area);

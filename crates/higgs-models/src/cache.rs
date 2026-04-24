@@ -1,4 +1,7 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 
 use mlx_rs::{Array, Dtype, Stream, error::Exception, ops, ops::concatenate_axis};
 
@@ -14,7 +17,8 @@ pub enum KvCacheView {
 }
 
 static TURBOQUANT_ACTIVATE_AT: OnceLock<i32> = OnceLock::new();
-const DEFAULT_TURBOQUANT_ACTIVATE_AT: i32 = 5000;
+static TURBOQUANT_INACTIVE_LOGGED: AtomicBool = AtomicBool::new(false);
+const DEFAULT_TURBOQUANT_ACTIVATE_AT: i32 = 2048;
 
 fn parse_turboquant_activate_at(raw: Option<&str>) -> i32 {
     raw.and_then(|s| s.parse::<i32>().ok())
@@ -23,11 +27,10 @@ fn parse_turboquant_activate_at(raw: Option<&str>) -> i32 {
 
 fn turboquant_activate_at() -> i32 {
     *TURBOQUANT_ACTIVATE_AT.get_or_init(|| {
-        parse_turboquant_activate_at(
-            std::env::var("HIGGS_TURBOQUANT_ACTIVATE_AT")
-                .ok()
-                .as_deref(),
-        )
+        let raw = std::env::var("HIGGS_TURBOQUANT_MIN_TOKENS")
+            .ok()
+            .or_else(|| std::env::var("HIGGS_TURBOQUANT_ACTIVATE_AT").ok());
+        parse_turboquant_activate_at(raw.as_deref())
     })
 }
 
@@ -651,6 +654,17 @@ impl SteppingKeyValueCache {
             } else {
                 let should_activate =
                     should_activate_turboquant(self.offset, new_tokens, activate_at);
+                if !should_activate
+                    && TURBOQUANT_INACTIVE_LOGGED
+                        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    tracing::info!(
+                        activate_at,
+                        current_tokens = self.offset + new_tokens,
+                        "TurboQuant configured but inactive; using dense KV until the activation threshold is reached"
+                    );
+                }
 
                 // Decode (or subsequent multi-token after first decode).
                 // If dense KV was accumulated during prefill, bulk-quantize it

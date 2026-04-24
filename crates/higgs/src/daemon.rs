@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -52,32 +53,51 @@ pub fn write_pid_file(profile: Option<&str>) {
 }
 
 #[allow(clippy::print_stderr)]
-pub fn cmd_stop(profile: Option<&str>) {
+pub fn cmd_stop(profile: Option<&str>, force: bool) -> i32 {
     let label = profile.map_or_else(|| "higgs".to_owned(), |p| format!("higgs [{p}]"));
     match read_pid(profile) {
         Some(pid) if pid_is_alive(pid) => {
             if let Err(e) = kill(Pid::from_raw(pid), Signal::SIGTERM) {
                 eprintln!("failed to send SIGTERM to {pid}: {e}");
-                std::process::exit(1);
+                return 1;
             }
             // Wait for process to exit before removing PID file
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             while pid_is_alive(pid) {
                 if std::time::Instant::now() >= deadline {
+                    if force {
+                        eprintln!("graceful stop timed out; sending SIGKILL to {pid}");
+                        if let Err(e) = kill(Pid::from_raw(pid), Signal::SIGKILL) {
+                            eprintln!("failed to send SIGKILL to {pid}: {e}");
+                            return 1;
+                        }
+                        let kill_deadline = std::time::Instant::now() + Duration::from_secs(2);
+                        while pid_is_alive(pid) {
+                            if std::time::Instant::now() >= kill_deadline {
+                                eprintln!("sent SIGKILL to {pid} but process is still running");
+                                return 1;
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        break;
+                    }
                     eprintln!("sent SIGTERM to {pid} but process still running after 5s");
-                    return;
+                    return 1;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             remove_pid_file(profile);
             eprintln!("stopped {label} (pid {pid})");
+            0
         }
         Some(_) => {
             remove_pid_file(profile);
             eprintln!("{label} is not running (stale pid file removed)");
+            0
         }
         None => {
             eprintln!("{label} is not running (no pid file)");
+            0
         }
     }
 }
@@ -213,19 +233,87 @@ fn resolve_host(host: &str) -> &str {
     }
 }
 
-#[allow(clippy::print_stdout)]
-pub fn cmd_shellenv(config: &HiggsConfig) {
-    let addr = format!(
+fn resolved_addr(config: &HiggsConfig) -> String {
+    format!(
         "{}:{}",
         resolve_host(&config.server.host),
         config.server.port
-    );
+    )
+}
 
-    if TcpStream::connect(&addr).is_ok() {
-        let base_url = format!("http://{addr}");
-        println!("export ANTHROPIC_BASE_URL={base_url}");
-        println!("export OPENAI_BASE_URL={base_url}");
+fn check_health(config: &HiggsConfig) -> Result<(), String> {
+    let addr = resolved_addr(config);
+    let mut stream =
+        TcpStream::connect(&addr).map_err(|e| format!("higgs is not running on {addr}: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| format!("failed to set read timeout for {addr}: {e}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| format!("failed to set write timeout for {addr}: {e}"))?;
+    let request = format!("GET /health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("failed to probe /health on {addr}: {e}"))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|e| format!("failed to read /health response from {addr}: {e}"))?;
+
+    if !(response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200")) {
+        return Err(format!(
+            "daemon health probe failed for {addr}: unexpected response status"
+        ));
     }
+    if !response.contains("\"status\":\"ok\"") {
+        return Err(format!(
+            "daemon health probe failed for {addr}: unexpected response body"
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_reachable(config: &HiggsConfig) -> Result<String, String> {
+    let addr = resolved_addr(config);
+    TcpStream::connect(&addr).map_err(|e| format!("higgs is not running on {addr}: {e}"))?;
+    Ok(addr)
+}
+
+fn ensure_dashboard_ready(config: &HiggsConfig, profile: Option<&str>) -> Result<(), String> {
+    if !config.logging.metrics.enabled {
+        return Err(
+            "cannot open dashboard: [logging.metrics] enabled = true required in config".to_owned(),
+        );
+    }
+    let Some(pid) = read_pid(profile) else {
+        return Err("cannot open dashboard: no running daemon for this config/profile".to_owned());
+    };
+    if !pid_is_alive(pid) {
+        remove_pid_file(profile);
+        return Err(format!(
+            "cannot open dashboard: daemon pid {pid} is not running"
+        ));
+    }
+    check_health(config)?;
+
+    let metrics_path = Path::new(&config.logging.metrics.path);
+    if !metrics_path.exists() {
+        return Err(format!(
+            "cannot open dashboard: metrics log not found at {}",
+            metrics_path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::print_stdout)]
+pub fn cmd_shellenv(config: &HiggsConfig) -> Result<(), String> {
+    let addr = ensure_reachable(config)?;
+    let base_url = format!("http://{addr}");
+    println!("export ANTHROPIC_BASE_URL={base_url}");
+    println!("export OPENAI_BASE_URL={base_url}");
+    Ok(())
 }
 
 /// Spawn a command with `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` pointing at the Higgs server.
@@ -238,14 +326,10 @@ pub fn cmd_exec(config: &HiggsConfig, command: &[String]) -> ! {
         std::process::exit(1);
     };
 
-    let addr = format!(
-        "{}:{}",
-        resolve_host(&config.server.host),
-        config.server.port
-    );
+    let addr = resolved_addr(config);
 
-    if TcpStream::connect(&addr).is_err() {
-        eprintln!("higgs is not running on {addr}");
+    if let Err(err) = ensure_reachable(config) {
+        eprintln!("{err}");
         eprintln!("hint: start with 'higgs start' or 'higgs serve'");
         std::process::exit(1);
     }
@@ -439,8 +523,8 @@ pub fn detach(config_path: &Path, verbose: bool, profile: Option<&str>) {
 
 #[allow(clippy::print_stderr)]
 pub fn run_attached(config: &HiggsConfig, profile: Option<&str>) {
-    if !config.logging.metrics.enabled {
-        eprintln!("cannot attach: [logging.metrics] enabled = true required in config");
+    if let Err(err) = ensure_dashboard_ready(config, profile) {
+        eprintln!("{err}");
         std::process::exit(1);
     }
 

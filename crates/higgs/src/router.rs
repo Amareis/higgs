@@ -80,8 +80,8 @@ struct AutoRouteEntry {
 ///
 /// Resolution order:
 /// 1. If `model == "auto"`, try auto-routing classification
-/// 2. Pattern matching (first match wins)
-/// 3. Direct engine lookup by model name
+/// 2. Direct engine lookup by model name
+/// 3. Pattern matching (first match wins)
 /// 4. Default provider fallback
 pub struct Router {
     local_engines: HashMap<String, Arc<Engine>>,
@@ -195,13 +195,6 @@ impl Router {
             // force mode: auto-routing returned nothing, fall through to normal resolution
         }
 
-        // Pattern matching (first match wins)
-        for route in &self.compiled_routes {
-            if route.pattern.is_match(model) {
-                return self.resolve_target(&route.target, model, RoutingMethod::Pattern);
-            }
-        }
-
         // Direct engine lookup
         if let Some(engine) = self.local_engines.get(model) {
             return Ok(ResolvedRoute::Higgs {
@@ -209,6 +202,13 @@ impl Router {
                 model_name: model.to_owned(),
                 routing_method: RoutingMethod::Direct,
             });
+        }
+
+        // Pattern matching (first match wins)
+        for route in &self.compiled_routes {
+            if route.pattern.is_match(model) {
+                return self.resolve_target(&route.target, model, RoutingMethod::Pattern);
+            }
         }
 
         // Default fallback
@@ -700,6 +700,47 @@ mod tests {
                 "got: {e}"
             ),
             Ok(_) => panic!("expected error for missing local model"),
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_local_model_beats_regex_route() {
+        let config = config_from_toml(
+            r#"
+            [[models]]
+            path = "mlx-community/Llama-3.2-1B-Instruct-4bit"
+            name = "llama"
+
+            [provider.remote]
+            url = "http://127.0.0.1:9"
+
+            [[routes]]
+            pattern = "llama"
+            provider = "remote"
+
+            [default]
+            provider = "remote"
+            "#,
+        );
+        let mut engines = HashMap::new();
+        engines.insert(
+            "llama".to_owned(),
+            Arc::new(crate::state::Engine::test_stub("llama")),
+        );
+
+        let router = Router::from_config(&config, engines).unwrap();
+        let result = router.resolve("llama", None).await.unwrap();
+
+        match result {
+            ResolvedRoute::Higgs {
+                model_name,
+                routing_method,
+                ..
+            } => {
+                assert_eq!(model_name, "llama");
+                assert_eq!(routing_method, RoutingMethod::Direct);
+            }
+            ResolvedRoute::Remote { .. } => panic!("expected exact local model to win"),
         }
     }
 
