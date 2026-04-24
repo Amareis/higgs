@@ -1,15 +1,35 @@
-# higgs
-
-<img src="docs/higgs-header.jpg" alt="Higgs" width="100%">
+# Higgs
 
 [![CI](https://github.com/panbanda/higgs/actions/workflows/ci.yml/badge.svg)](https://github.com/panbanda/higgs/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/panbanda/higgs)](https://github.com/panbanda/higgs/releases)
 [![Crates.io](https://img.shields.io/crates/v/higgs)](https://crates.io/crates/higgs)
 [![License](https://img.shields.io/badge/license-MIT-blue)](#license)
 
-A model router and inference server for Apple Silicon that optimizes model serving using unified memory. Serve local MLX models and proxy to remote providers (OpenAI, Anthropic, Ollama, etc.) through a single endpoint with automatic format translation. Single static Rust binary, no Python runtime. Built on [mlx-rs](https://github.com/oxideai/mlx-rs).
+Run open-weight MLX models locally on Apple Silicon, route requests across local and remote providers, and expose everything through one endpoint.
 
-## Install
+Higgs is a single static Rust binary that serves local models, proxies to providers like OpenAI, Anthropic, and Ollama, and translates between OpenAI and Anthropic-style APIs so your existing tools and apps do not need a new integration.
+
+**Why care**
+- Run open-weight models locally on your Mac, including supported Qwen, Llama, Mistral, Gemma, Phi, DeepSeek, and vision-capable MLX families.
+- Send requests to local models or remote providers through one endpoint.
+- Plug tools into Higgs with `higgs shellenv` or `higgs exec` instead of reconfiguring each client separately.
+
+**Use Higgs if**
+- you want local open-weight model serving on Apple Silicon
+- you switch between local and hosted models
+- you want one API surface for apps, agents, and terminal tools
+
+## Quick Links
+
+- [Quick Start](#quick-start)
+- [Configuration](docs/configuration.md)
+- [Supported Models](docs/models.md)
+- [Benchmarking](docs/benchmarking.md)
+- [Contributing](CONTRIBUTING.md)
+
+## Quick Start
+
+Install:
 
 ```bash
 brew install panbanda/brews/higgs
@@ -21,357 +41,78 @@ Or build from source (Rust 1.88.0+, Xcode CLI Tools):
 cargo build --release
 ```
 
-## Quick Start
-
-### Simple mode (no config file)
+Run a local open-weight model:
 
 ```bash
-higgs serve --model mlx-community/Llama-3.2-1B-Instruct-4bit
-higgs serve --model mlx-community/Llama-3.2-1B-Instruct-4bit --model mlx-community/Qwen3-1.7B-4bit
+higgs serve --model mlx-community/Qwen3.6-35B-A3B-4bit
 ```
 
-Accepts HuggingFace model IDs (resolved from `~/.cache/huggingface/hub/`) or local paths. Prompts to download if not cached. Models must be **MLX safetensors format** with a supported `config.json` `model_type` (for example from [mlx-community](https://huggingface.co/mlx-community)).
-
-### Gateway mode (config file)
+Send a request to the local endpoint:
 
 ```bash
-higgs init        # create ~/.config/higgs/config.toml
-higgs serve       # start with config
-higgs start       # start as background daemon
-higgs attach      # attach TUI dashboard to running daemon
-higgs stop        # stop daemon
-```
-
-### Profiles
-
-Named profiles let you maintain multiple configurations and run multiple instances simultaneously:
-
-```bash
-higgs init --profile dev              # create config.dev.toml
-higgs init --profile prod             # create config.prod.toml
-higgs serve --profile dev             # foreground with dev config
-higgs start --profile dev             # daemon with dev config (separate PID/log)
-higgs start --profile prod            # daemon with prod config (different port)
-higgs attach --profile dev            # attach TUI to dev instance
-higgs stop --profile dev              # stop only the dev instance
-higgs doctor --profile prod           # validate prod config
-```
-
-Each profile gets isolated runtime files (`higgs.<profile>.pid`, `higgs.<profile>.log`, `metrics.<profile>.jsonl`). Profiles must use different ports (configured in each profile's config file). `--profile` and `--config` are mutually exclusive.
-
-## Features
-
-### Local inference
-- **OpenAI + Anthropic APIs** -- chat completions, text completions, embeddings, messages
-- **Structured output** -- `json_schema` response format (100% schema compliance)
-- **Reasoning models** -- `<think>` tag extraction to `reasoning_content`
-- **Continuous batching** -- 755 tok/s aggregate at 8 concurrent requests
-- **Radix tree prefix cache** -- shared prefix reuse across requests
-- **Vision** -- multimodal image+text (LLaVA-Qwen2)
-- **13 architecture variants** -- LLaMA, Mistral, Qwen2, Qwen3, Qwen3.5 (dense + MoE), Qwen3-Next, Qwen3-MoE, Gemma 2, Phi-3, Starcoder2, DeepSeek-V2, LLaVA-Qwen2
-
-### Gateway
-- **Remote providers** -- proxy requests to OpenAI, Anthropic, Ollama, or any OpenAI-compatible API
-- **Format translation** -- send OpenAI requests to Anthropic providers (and vice versa) with automatic conversion of request/response formats, including streaming
-- **Pattern routing** -- regex-based model name matching to route requests to the right provider
-- **Model rewriting** -- map model aliases to upstream model names
-- **Auto-router** -- classify requests using a local LLM to pick the best provider
-- **Metrics dashboard** -- TUI with live request rates, latency, token throughput, and error tracking
-- **Daemon mode** -- `higgs start`/`stop`/`attach` for background operation
-- **Config management** -- `higgs config get/set`, `higgs doctor` for validation
-
-## Configuration
-
-### Simple mode (CLI flags)
-
-| CLI Flag | Env Variable | Default | Description |
-|---|---|---|---|
-| `--model` | `HIGGS_MODELS` | *(required)* | Model path or HF ID (repeatable) |
-| `--host` | `HIGGS_HOST` | `0.0.0.0` | Bind address |
-| `--port` | `HIGGS_PORT` | `8000` | Bind port |
-| `--max-tokens` | `HIGGS_MAX_TOKENS` | `32768` | Max generation tokens |
-| `--api-key` | `HIGGS_API_KEY` | *(none)* | Bearer token for auth |
-| `--rate-limit` | `HIGGS_RATE_LIMIT` | `0` | Requests/min per client |
-| `--timeout` | `HIGGS_TIMEOUT` | `300` | Request timeout (seconds) |
-| `--mlx-profile` | `HIGGS_MLX_PROFILE` | `auto` | MLX tuning profile: `auto`, `latency`, `balanced`, or `throughput` |
-| `--batch` | -- | `false` | Enable continuous batching |
-| `--kv-cache` | -- | `off` | KV cache mode: `off` or `turboquant` |
-| `--kv-bits` | -- | `3` | Default TurboQuant KV bit width |
-| `--kv-key-bits` | -- | `kv-bits - 1` | Override TurboQuant key bit width |
-| `--kv-value-bits` | -- | `kv-bits` | Override TurboQuant value bit width |
-| `--kv-no-norm-correction` | -- | `false` | Disable TurboQuant norm correction |
-| `--kv-adaptive-dense-layers` | -- | `0` | Keep the last N KV cache layers dense |
-| `--kv-seed` | -- | `0` | TurboQuant seed |
-
-`auto` resolves to `balanced` for small/medium models and `throughput` for large models.
-
-Additional simple-mode env toggles:
-- `HIGGS_ENABLE_THINKING=0|1` forces Qwen thinking on or off.
-- `HIGGS_CHUNKED_PREFILL_THRESHOLD` enables chunked prefill above a token threshold.
-- `HIGGS_CHUNKED_PREFILL_CHUNK_SIZE` controls the chunk size used during chunked prefill.
-- `HIGGS_MTP=0|1` overrides the tuning profile's speculative decode choice when conditions allow.
-- `HIGGS_CHUNKED_PREFILL_THRESHOLD`, `HIGGS_CHUNKED_PREFILL_CHUNK_SIZE`, and `HIGGS_CLEAR_CACHE_AFTER_PREFILL` override the selected MLX profile.
-- Qwen thinking budget is currently fixed at 256 tokens and not currently configurable.
-
-### Gateway mode (config file)
-
-Run `higgs init` to create `~/.config/higgs/config.toml`:
-
-```toml
-[server]
-host = "0.0.0.0"
-port = 8000
-# max_tokens = 32768
-# timeout = 300.0
-# api_key = "sk-..."
-
-# --- Local defaults ---
-[local]
-mlx_profile = "auto"
-
-# --- Local models ---
-[[models]]
-path = "mlx-community/Llama-3.2-1B-Instruct-4bit"
-# name = "llama"     # optional friendly name (used as engine key and for auto_router lookup)
-# mlx_profile = "throughput"   # optional per-model override
-# batch = false
-# kv_cache = "turboquant"
-# kv_bits = 3
-# kv_key_bits = 2
-# kv_value_bits = 3
-# kv_norm_correction = true
-# kv_adaptive_dense_layers = 0
-# kv_seed = 0
-
-# --- Remote providers ---
-[provider.anthropic]
-url = "https://api.anthropic.com"
-format = "anthropic"
-
-[provider.openai]
-url = "https://api.openai.com"
-format = "openai"
-
-[provider.ollama]
-url = "http://localhost:11434"
-strip_auth = true
-
-# --- Routes ---
-# First regex match wins. Requests matching a local model name are served locally.
-
-[[routes]]
-pattern = "claude-.*"
-provider = "anthropic"
-
-[[routes]]
-pattern = "gpt-.*"
-provider = "openai"
-
-# Model rewriting: requests for "my-alias" are sent to the provider as "actual-model-name"
-# [[routes]]
-# pattern = "my-alias"
-# provider = "openai"
-# model = "gpt-4o"
-
-# --- Default route ---
-[default]
-provider = "higgs"   # "higgs" = local models only; set to a provider name to proxy unmatched requests
-
-# --- Auto router (optional) ---
-# Classify requests with a local LLM to pick the best provider automatically.
-# The model field can reference a model by name or path.
-# [auto_router]
-# enabled = true
-# model = "llama"    # matches [[models]] name or path
-# timeout_ms = 2000
-
-# --- Metrics & dashboard ---
-[retention]
-enabled = true
-minutes = 60
-
-[logging.metrics]
-enabled = true
-# path = "~/.config/higgs/logs/metrics.jsonl"
-# max_size_mb = 50
-# max_files = 5
-```
-
-MLX profile precedence for local models:
-- `[[models]].mlx_profile`
-- `--mlx-profile`
-- `HIGGS_MLX_PROFILE`
-- `[local].mlx_profile`
-- built-in default `auto`
-
-### Benchmark-Driven Defaults
-
-`auto` is based on the benchmark harness in [benchmarks/bench_mlx_tuning.py](/Users/panbanda/conductor/workspaces/higgs/cape-town/benchmarks/bench_mlx_tuning.py), which scores:
-- weighted TTFT across short, medium, and long prompts
-- weighted decode throughput
-- short QA accuracy
-- long-context retrieval accuracy
-- structured-output correctness
-- prefix-cache speedup
-
-Benchmarks that informed the default:
-- `mlx-community/Qwen3-1.7B-4bit`: `balanced` won with `91.8` composite, `339 ms` weighted TTFT, `345.7 tok/s` decode, and `20.36x` prefix-cache speedup.
-- `mlx-community/Qwen3.6-35B-A3B-4bit`: `throughput` won with `95.7` composite, `842 ms` weighted TTFT, `119.2 tok/s` decode, and `56.19x` prefix-cache speedup.
-
-That is why `auto` resolves to `balanced` for small and medium models, and `throughput` for large and huge models.
-
-#### Provider options
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `url` | string | *(required)* | Base URL of the upstream API |
-| `format` | `"openai"` or `"anthropic"` | `"openai"` | API format the provider speaks |
-| `api_key` | string | *(none)* | API key to inject into proxied requests |
-| `strip_auth` | bool | `false` | Remove the client's Authorization header before proxying |
-| `stub_count_tokens` | bool | `false` | Return a stub for `/v1/messages/count_tokens` |
-
-#### Route options
-
-| Field | Type | Description |
-|---|---|---|
-| `pattern` | regex | Match against the `model` field in requests |
-| `provider` | string | Provider name to forward to |
-| `model` | string | Rewrite the model field before forwarding |
-| `name` | string | Human label (used by auto-router) |
-| `description` | string | Route description (used by auto-router for classification) |
-
-## API
-
-**OpenAI**: `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`
-**Anthropic**: `/v1/messages`, `/v1/messages/count_tokens`
-**Metrics**: `/metrics` (JSON)
-**Health**: `/health`
-
-Format translation works transparently: send an OpenAI-format request to higgs and it will translate to Anthropic format if the matched route points to an Anthropic provider (and vice versa), including streaming responses.
-
-```bash
-# Local model
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
-       "messages": [{"role": "user", "content": "Hello!"}]}'
-
-# Proxied to Anthropic (translated from OpenAI format automatically)
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $ANTHROPIC_API_KEY" \
-  -d '{"model": "claude-sonnet-4-6",
-       "messages": [{"role": "user", "content": "Hello!"}]}'
+  -d '{
+    "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+    "messages": [{"role": "user", "content": "Write one sentence about Cape Town."}]
+  }'
 ```
 
-### Shell integration
-
-Add to your shell profile to point AI tools at higgs:
-
-```bash
-eval "$(higgs shellenv)"
-# Exports ANTHROPIC_BASE_URL and OPENAI_BASE_URL when the server is reachable
-```
-
-Or run a single command with the env vars set:
+Point an existing tool at Higgs:
 
 ```bash
 higgs exec -- claude
-higgs exec -- aider --model openai/gpt-4o
 ```
 
-`higgs exec` verifies the server is reachable, sets `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL`, then execs the command.
+Requests can also target routed remote models through the same endpoint. For example, an OpenAI-format request can be translated and proxied to Anthropic based on your route configuration:
 
-## CLI Commands
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ANTHROPIC_API_KEY" \
+  -d '{
+    "model": "claude-sonnet-4-6",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
 
-| Command | Description |
-|---|---|
-| `higgs serve` | Start the server in the foreground |
-| `higgs start` | Start as a background daemon |
-| `higgs stop` | Stop a running daemon |
-| `higgs attach` | Attach TUI dashboard to a running daemon |
-| `higgs init` | Create default config at `~/.config/higgs/config.toml` |
-| `higgs shellenv` | Print `export` lines for `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` |
-| `higgs exec -- <cmd>` | Set env vars and exec a command (replaces `eval "$(higgs shellenv)"`) |
-| `higgs config get <key>` | Read a config value (dot-separated key) |
-| `higgs config set <key> <value>` | Write a config value |
-| `higgs config path` | Print the resolved config file path |
-| `higgs doctor` | Validate config, check model paths, probe providers |
+## What Higgs Does
 
-### Global flags
+### Run open-weight models locally on Apple Silicon
 
-| Flag | Description |
-|---|---|
-| `--config <FILE>` | Path to config file (conflicts with `--profile`) |
-| `--profile <NAME>` | Named profile, resolves to `config.<NAME>.toml` (conflicts with `--config`) |
-| `--verbose` | Enable debug logging |
+- Serve MLX models from Hugging Face IDs or local paths.
+- Support current model families including Qwen 3.6, Qwen 3.x, Llama, Mistral, Gemma 2, Phi-3, Starcoder2, DeepSeek-V2, and LLaVA-Qwen2.
+- Expose local serving through OpenAI and Anthropic-compatible endpoints.
 
-## Supported Architectures
+### Use one endpoint for local and remote models
 
-Higgs detects support from `config.json` `model_type`. The examples below are representative, not exhaustive.
+- Serve local MLX models and proxy remote providers from the same server.
+- Keep client integrations stable while you switch between local and hosted backends.
+- Route unmatched requests to a configured default target.
 
-| Architecture | `model_type` | Examples |
-|---|---|---|
-| LLaMA | `llama` | Llama 3/3.1, CodeLlama |
-| Mistral | `mistral` | Mistral 7B |
-| Qwen2 | `qwen2` | Qwen2, Qwen2.5 |
-| Qwen3 | `qwen3` | Qwen3 |
-| Qwen3.5 (dense) | `qwen3_5` | Qwen3.5 dense MLX checkpoints |
-| Qwen3.5 / Qwen3.6 MoE | `qwen3_5_moe` | Qwen3.5-35B-A3B, Qwen3.6-35B-A3B |
-| Qwen3-Next | `qwen3_next` | Qwen3-Coder (SSM hybrid) |
-| Qwen3-MoE | `qwen3_moe` | Qwen3-30B-A3B (sparse MoE) |
-| Gemma 2 | `gemma2` | Gemma 2 2B/9B/27B |
-| Phi-3 | `phi3` | Phi-3 Mini/Small/Medium |
-| Starcoder2 | `starcoder2` | Starcoder2 3B/7B/15B |
-| DeepSeek-V2 | `deepseek_v2` | DeepSeek-V2-Lite (MLA + MoE) |
-| LLaVA-Qwen2 | `llava-qwen2` | nanoLLaVA-1.5 (vision) |
+### Route and translate requests across providers
 
-### Known Working MLX Examples
+- Resolve requests by direct local model selection, regex pattern routing, model alias rewriting, or the optional auto-router.
+- Translate OpenAI-format requests to Anthropic providers and Anthropic-format requests back to OpenAI-style clients, including streaming where supported.
+- Proxy to OpenAI, Anthropic, Ollama, and other OpenAI-compatible APIs.
 
-These are concrete model IDs that have been used on this branch or are representative of currently supported families:
+### Plug Higgs into existing tools
 
-| Family | Example model IDs |
-|---|---|
-| LLaMA | `mlx-community/Llama-3.2-1B-Instruct-4bit` |
-| Qwen3 | `mlx-community/Qwen3-1.7B-4bit` |
-| Qwen3-Next | `mlx-community/Qwen3-Coder-Next-4bit` |
-| Qwen3.5 dense | `mlx-community/Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-4bit` |
-| Qwen3.5 MoE | `NexVeridian/Qwen3.5-35B-A3B-3bit` |
-| Qwen3.6 MoE | `mlx-community/Qwen3.6-35B-A3B-4bit` |
-| DeepSeek-V2 | `mlx-community/DeepSeek-Coder-V2-Lite-Instruct-4bit-mlx` |
+- Use `higgs shellenv` to export `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL`.
+- Use `higgs exec -- <cmd>` to launch a command with those variables set.
+- Point tools such as Claude Code, Aider, and other OpenAI/Anthropic-compatible clients at a single local endpoint.
 
-### Notes On Qwen 3.6
+### Monitor usage with daemon mode and dashboard
 
-- `Qwen3.6` support is included in this branch through the `qwen3_5_moe` loader path.
-- The branch has been smoke-tested against `mlx-community/Qwen3.6-35B-A3B-4bit`.
-- By default, OpenAI-style chat requests now use non-thinking mode for `Qwen3.6` unless the request explicitly opts into reasoning.
+- Run in the foreground with `higgs serve` or as a background daemon with `higgs start`.
+- Attach the TUI dashboard with `higgs attach` for live routing, latency, throughput, and error visibility.
+- Validate config and model/provider setup with `higgs doctor`.
 
 ## Performance
 
-All benchmarks on M4 Max 128GB. Temperature=0, warmup pass excluded.
+Benchmarks below were run on M4 Max 128GB. Methodology, harness details, and benchmark-driven defaults are documented in [docs/benchmarking.md](docs/benchmarking.md).
 
-### MLX tuning benchmark
-
-Use the benchmark harness below to compare five serving iterations on the same local model:
-
-```bash
-python3 benchmarks/bench_mlx_tuning.py ~/.cache/lm-studio/models/mlx-community/Qwen3.6-35B-A3B-4bit
-```
-
-The harness scores:
-- TTFT and decode throughput across short, medium, and long prompts
-- long-context retrieval accuracy
-- structured-output correctness
-- prefix-cache speedup on a multi-turn conversation
-
-The five iterations are:
-- baseline
-- latency profile
-- balanced profile
-- throughput profile
-- throughput profile plus safe TurboQuant KV settings
-
-### Decode throughput (tok/s)
+### Decode Throughput (tok/s)
 
 Single request, 500 generated tokens, median of 3 runs.
 
@@ -386,11 +127,11 @@ Single request, 500 generated tokens, median of 3 runs.
 | Starcoder2-3B-4bit | 107 | 176 | 165 | -- | -- |
 | DeepSeek-V2-Lite-4bit | 140 | 174 | 99 | -- | -- |
 
-MLX models use 4-bit (8-bit for MoE). llama.cpp/Ollama use Q4_K_M (Q8_0 for MoE).
+MLX models use 4-bit, or 8-bit for MoE. `llama.cpp` and Ollama use `Q4_K_M`, or `Q8_0` for MoE.
 
-### MoE prefill (time to first token)
+### MoE Prefill (time to first token)
 
-Measured on DeepSeek-V2-Lite-4bit (64 experts, top_k=6). Global batch sort reorders tokens by expert index before `gather_qmm`, giving coalesced GPU memory access.
+Measured on DeepSeek-V2-Lite-4bit with global batch sorting before `gather_qmm`.
 
 | Prompt tokens | Before | After | Speedup |
 |---|---|---|---|
@@ -399,7 +140,7 @@ Measured on DeepSeek-V2-Lite-4bit (64 experts, top_k=6). Global batch sort reord
 | 1,831 | 14,390ms | 3,123ms | 4.6x |
 | 4,532 | 37,489ms | 8,860ms | 4.2x |
 
-### Continuous batching (Llama-1B)
+### Continuous Batching (Llama-1B)
 
 | Concurrent requests | higgs tok/s | vllm-mlx tok/s |
 |---|---|---|
@@ -420,13 +161,39 @@ Measured on DeepSeek-V2-Lite-4bit (64 experts, top_k=6). Global batch sort reord
 | Phi-3-mini-4bit | 2,126 | 2,548 | 2,573 |
 | DeepSeek-V2-Lite-4bit | 8,528 | 8,972 | 8,998 |
 
-### Feature comparison
+### Feature Comparison
 
 | | higgs | vllm-mlx |
 |---|---|---|
 | Structured output (10 prompts, JSON schema) | 100% | 0% |
 | Reasoning extraction (5 questions, Qwen3) | 5/5 | 4/5 |
 | All architectures produce coherent output | Yes | Yes |
+
+## API and CLI Overview
+
+**API endpoints**
+
+- OpenAI: `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`
+- Anthropic: `/v1/messages`, `/v1/messages/count_tokens`
+- Metrics: `/metrics`
+- Health: `/health`
+
+**Core commands**
+
+- `higgs serve`: start in the foreground
+- `higgs start`: start as a background daemon
+- `higgs stop`: stop a running daemon
+- `higgs attach`: attach the TUI dashboard
+- `higgs init`: create `~/.config/higgs/config.toml`
+- `higgs doctor`: validate config, model paths, and providers
+- `higgs shellenv`: print `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL`
+- `higgs exec -- <cmd>`: run a tool with those variables set
+
+For full configuration reference, routing options, supported model families, and benchmark details, see:
+
+- [docs/configuration.md](docs/configuration.md)
+- [docs/models.md](docs/models.md)
+- [docs/benchmarking.md](docs/benchmarking.md)
 
 ## Development
 
@@ -435,6 +202,8 @@ cargo test -- --test-threads=1
 cargo clippy
 cargo fmt --check
 ```
+
+Contributor workflow, project structure, and doc update expectations live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
