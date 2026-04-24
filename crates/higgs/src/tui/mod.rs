@@ -644,6 +644,7 @@ mod tests {
             models: vec![ModelConfig {
                 path: "mlx-community/Llama-3.2-1B-Instruct-4bit".to_owned(),
                 name: None,
+                mlx_profile: None,
                 batch: false,
                 kv_cache: higgs_models::turboquant::KvCacheMode::Off,
                 kv_bits: 3,

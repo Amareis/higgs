@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use clap::Parser;
+use higgs_engine::mlx_tuning::resolve_runtime_tuning;
 
 use higgs::{
     build_router,
@@ -252,7 +253,9 @@ fn load_engines(
         let engine = if model_cfg.batch {
             Engine::load_batch(&resolved, kv_cache_config)?
         } else {
-            Engine::load_simple(&resolved, kv_cache_config)?
+            let tuning =
+                resolve_runtime_tuning(&resolved, model_cfg.requested_mlx_profile(&config.local));
+            Engine::load_simple(&resolved, kv_cache_config, tuning)?
         };
         let name = model_cfg
             .name

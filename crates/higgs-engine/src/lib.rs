@@ -4,6 +4,7 @@ pub mod chat_template;
 pub mod constrained;
 pub mod engine;
 pub mod error;
+pub mod mlx_tuning;
 pub mod model_loader;
 pub mod mtp;
 pub mod paged_prefix_cache;

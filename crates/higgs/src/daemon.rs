@@ -115,6 +115,13 @@ port = 8000
 # api_key = "sk-..."
 # rate_limit = 0
 
+# --- Local serving defaults ---
+# MLX profile applies to simple-engine local models. "auto" picks balanced for
+# small/medium models and throughput for large models.
+
+# [local]
+# mlx_profile = "auto"
+
 # --- Local models ---
 # Each [[models]] entry loads an MLX model into GPU memory.
 # Use a HuggingFace model ID or a local path.
@@ -122,6 +129,7 @@ port = 8000
 # [[models]]
 # path = "mlx-community/Llama-3.2-1B-Instruct-4bit"
 # name = "llama"
+# mlx_profile = "throughput"
 # batch = false
 
 # --- Remote providers ---
