@@ -7,7 +7,7 @@
 )]
 
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, MutexGuard};
 
 use higgs_models::{
     AnyCache, AnyModel, LogprobArrays, SamplingParams, apply_penalties, sample,
@@ -26,6 +26,7 @@ use crate::{
     chat_template::{ChatMessage, ChatTemplateRenderer},
     engine::{GenerationOutput, StreamingOutput},
     error::EngineError,
+    mlx_tuning::MlxRuntimeTuning,
     model_loader,
     paged_prefix_cache::{DEFAULT_BLOCK_SIZE, PagedPrefixCache},
     scheduler::RoundRobinScheduler,
@@ -34,33 +35,12 @@ use crate::{
 /// Default maximum number of cached prefixes.
 const DEFAULT_PREFIX_CACHE_SIZE: usize = 8;
 const DEFAULT_PAGED_KV_BLOCK_SIZE: usize = 64;
-const PAGED_KV_TARGET_BYTES: usize = 512 * 1024 * 1024;
 
 /// Acquire a `Mutex` lock, recovering from poison by reusing the inner data.
 /// Used in this crate to keep session-management methods infallible while
 /// still satisfying `clippy::unwrap_used`.
 fn lock_or_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Conservative default for chunked prefill on 27B-class models.
-const DEFAULT_CHUNKED_PREFILL_THRESHOLD: i32 = 512;
-
-/// Conservative default for chunked prefill on 27B-class models.
-const DEFAULT_CHUNKED_PREFILL_CHUNK_SIZE: i32 = 512;
-
-/// Sequences longer than this trigger chunked prefill to bound peak memory.
-static CHUNKED_PREFILL_THRESHOLD: OnceLock<i32> = OnceLock::new();
-
-/// Number of tokens per chunk during chunked prefill.
-static CHUNKED_PREFILL_CHUNK_SIZE: OnceLock<i32> = OnceLock::new();
-static CLEAR_CACHE_AFTER_PREFILL: OnceLock<bool> = OnceLock::new();
-static HIGGS_MTP_ENABLED: OnceLock<bool> = OnceLock::new();
-
-fn parse_positive_chunked_prefill_value(raw: Option<&str>, default: i32) -> i32 {
-    raw.and_then(|s| s.parse::<i32>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(default)
 }
 
 fn parse_enabled_flag(raw: Option<&str>) -> Option<bool> {
@@ -71,58 +51,34 @@ fn parse_enabled_flag(raw: Option<&str>) -> Option<bool> {
     }
 }
 
-fn mtp_enabled() -> bool {
-    *HIGGS_MTP_ENABLED.get_or_init(|| {
-        parse_enabled_flag(std::env::var("HIGGS_MTP").ok().as_deref()).unwrap_or(false)
-    })
-}
-
-fn chunked_prefill_threshold() -> i32 {
-    *CHUNKED_PREFILL_THRESHOLD.get_or_init(|| {
-        parse_positive_chunked_prefill_value(
-            std::env::var("HIGGS_CHUNKED_PREFILL_THRESHOLD")
-                .ok()
-                .as_deref(),
-            DEFAULT_CHUNKED_PREFILL_THRESHOLD,
-        )
-    })
-}
-
-fn chunked_prefill_chunk_size() -> i32 {
-    *CHUNKED_PREFILL_CHUNK_SIZE.get_or_init(|| {
-        parse_positive_chunked_prefill_value(
-            std::env::var("HIGGS_CHUNKED_PREFILL_CHUNK_SIZE")
-                .ok()
-                .as_deref(),
-            DEFAULT_CHUNKED_PREFILL_CHUNK_SIZE,
-        )
-    })
-}
-
-fn clear_cache_after_prefill_enabled() -> bool {
-    *CLEAR_CACHE_AFTER_PREFILL.get_or_init(|| {
-        parse_enabled_flag(
-            std::env::var("HIGGS_CLEAR_CACHE_AFTER_PREFILL")
-                .ok()
-                .as_deref(),
-        )
-        .unwrap_or(false)
-    })
-}
-
-fn estimate_paged_kv_blocks(num_kv_heads: usize, head_dim: usize, block_size: usize) -> usize {
+fn estimate_paged_kv_blocks(
+    target_bytes: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    block_size: usize,
+) -> usize {
     let bytes_per_token = num_kv_heads
         .saturating_mul(head_dim)
         .saturating_mul(2)
         .saturating_mul(std::mem::size_of::<half::f16>())
         .max(1);
     let bytes_per_block = bytes_per_token.saturating_mul(block_size).max(1);
-    (PAGED_KV_TARGET_BYTES / bytes_per_block).clamp(256, 4096)
+    (target_bytes / bytes_per_block).clamp(256, 4096)
 }
 
 #[allow(unsafe_code)]
-pub(crate) fn maybe_clear_mlx_cache(reason: &str) {
-    if !clear_cache_after_prefill_enabled() {
+pub(crate) fn should_clear_mlx_cache_after_prefill() -> bool {
+    parse_enabled_flag(
+        std::env::var("HIGGS_CLEAR_CACHE_AFTER_PREFILL")
+            .ok()
+            .as_deref(),
+    )
+    .unwrap_or(false)
+}
+
+#[allow(unsafe_code)]
+pub(crate) fn maybe_clear_mlx_cache(enabled: bool, reason: &str) {
+    if !enabled {
         return;
     }
 
@@ -245,6 +201,7 @@ pub struct SimpleEngine {
     /// share the same token prefix (the generation prompt changes between turns).
     gen_prompt_suffix_len: usize,
     kv_cache_config: KvCacheConfig,
+    tuning: MlxRuntimeTuning,
 }
 
 /// Intermediate state after prefix cache lookup and model locking.
@@ -261,6 +218,7 @@ impl SimpleEngine {
     pub fn load<P: AsRef<Path>>(
         dir: P,
         kv_cache_config: KvCacheConfig,
+        tuning: MlxRuntimeTuning,
     ) -> Result<Self, EngineError> {
         let model_dir = dir.as_ref();
         let model_name = derive_model_name(model_dir);
@@ -352,6 +310,13 @@ impl SimpleEngine {
         tracing::info!(
             model_name = %model_name,
             eos_tokens = ?eos_token_ids,
+            requested_mlx_profile = tuning.requested_profile().as_str(),
+            effective_mlx_profile = tuning.resolved_profile().as_str(),
+            chunked_prefill_threshold = tuning.chunked_prefill_threshold(),
+            chunked_prefill_chunk_size = tuning.chunked_prefill_chunk_size(),
+            clear_cache_after_prefill = tuning.clear_cache_after_prefill(),
+            mtp_enabled = tuning.enable_mtp(),
+            paged_kv_target_mb = tuning.paged_kv_target_bytes() / (1024 * 1024),
             "Engine ready"
         );
 
@@ -362,8 +327,12 @@ impl SimpleEngine {
             .map_err(|_| EngineError::Generation("paged cache num_kv_heads overflow".to_owned()))?;
         let head_dim = usize::try_from(raw_head_dim)
             .map_err(|_| EngineError::Generation("paged cache head_dim overflow".to_owned()))?;
-        let num_blocks =
-            estimate_paged_kv_blocks(num_kv_heads, head_dim, DEFAULT_PAGED_KV_BLOCK_SIZE);
+        let num_blocks = estimate_paged_kv_blocks(
+            tuning.paged_kv_target_bytes(),
+            num_kv_heads,
+            head_dim,
+            DEFAULT_PAGED_KV_BLOCK_SIZE,
+        );
 
         let paged_cache = PagedKvCache::new(
             num_blocks,
@@ -390,6 +359,7 @@ impl SimpleEngine {
             think_close_token,
             gen_prompt_suffix_len,
             kv_cache_config,
+            tuning,
         })
     }
 
@@ -573,8 +543,8 @@ impl SimpleEngine {
             // Text-only prefill: use chunked prefill for long sequences to bound
             // peak memory, otherwise single-pass with last-token-only LM head.
             let seq_len = prepared.prompt_array.shape().get(1).copied().unwrap_or(0);
-            let chunked_threshold = chunked_prefill_threshold();
-            let chunked_size = chunked_prefill_chunk_size();
+            let chunked_threshold = self.tuning.chunked_prefill_threshold();
+            let chunked_size = self.tuning.chunked_prefill_chunk_size();
             if seq_len > chunked_threshold {
                 prepared
                     .model
@@ -639,7 +609,10 @@ impl SimpleEngine {
                 .unwrap_or(prompt_tokens);
             pc.store(cache_key, &prepared.cache);
         }
-        maybe_clear_mlx_cache("simple_post_prefill");
+        maybe_clear_mlx_cache(
+            self.tuning.clear_cache_after_prefill(),
+            "simple_post_prefill",
+        );
 
         Ok((current_token, logprob_data))
     }
@@ -985,10 +958,10 @@ impl SimpleEngine {
             });
         }
 
-        // MTP speculative decode: gated behind HIGGS_MTP env var.
+        // MTP speculative decode: enabled by the resolved MLX runtime tuning.
         // Only for greedy (temperature == 0), no constraints, no logprobs.
         #[allow(clippy::float_cmp)]
-        if mtp_enabled()
+        if self.tuning.enable_mtp()
             && prepared.model.has_mtp()
             && constraint.is_none()
             && !logprobs
@@ -1872,7 +1845,7 @@ impl SimpleEngine {
 
         // MTP speculative decode (streaming): greedy, no constraints, no logprobs.
         #[allow(clippy::float_cmp)]
-        if mtp_enabled()
+        if self.tuning.enable_mtp()
             && prepared.model.has_mtp()
             && constraint.is_none()
             && !logprobs
@@ -2186,7 +2159,6 @@ fn detect_thinking_support(model_dir: &Path) -> bool {
 mod tests {
     use super::{
         check_stop_sequences, derive_model_name, estimate_paged_kv_blocks, parse_enabled_flag,
-        parse_positive_chunked_prefill_value,
     };
     use std::path::Path;
 
@@ -2417,31 +2389,19 @@ mod tests {
 
     #[test]
     fn test_estimate_paged_kv_blocks_clamps_to_minimum() {
-        assert_eq!(estimate_paged_kv_blocks(512, 512, 64), 256);
+        assert_eq!(estimate_paged_kv_blocks(512, 512, 512, 64), 256);
     }
 
     #[test]
     fn test_estimate_paged_kv_blocks_clamps_to_maximum() {
-        assert_eq!(estimate_paged_kv_blocks(1, 1, 1), 4096);
+        assert_eq!(estimate_paged_kv_blocks(usize::MAX, 1, 1, 1), 4096);
     }
 
     #[test]
     fn test_estimate_paged_kv_blocks_scales_with_geometry() {
-        assert_eq!(estimate_paged_kv_blocks(8, 128, 64), 2048);
-    }
-
-    #[test]
-    fn test_parse_positive_chunked_prefill_value_uses_default_for_invalid_values() {
-        assert_eq!(parse_positive_chunked_prefill_value(None, 2048), 2048);
         assert_eq!(
-            parse_positive_chunked_prefill_value(Some("bad"), 2048),
+            estimate_paged_kv_blocks(512 * 1024 * 1024, 8, 128, 64),
             2048
-        );
-        assert_eq!(parse_positive_chunked_prefill_value(Some("0"), 2048), 2048);
-        assert_eq!(parse_positive_chunked_prefill_value(Some("-1"), 2048), 2048);
-        assert_eq!(
-            parse_positive_chunked_prefill_value(Some("1024"), 2048),
-            1024
         );
     }
 

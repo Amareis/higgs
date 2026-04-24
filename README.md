@@ -93,6 +93,7 @@ Each profile gets isolated runtime files (`higgs.<profile>.pid`, `higgs.<profile
 | `--api-key` | `HIGGS_API_KEY` | *(none)* | Bearer token for auth |
 | `--rate-limit` | `HIGGS_RATE_LIMIT` | `0` | Requests/min per client |
 | `--timeout` | `HIGGS_TIMEOUT` | `300` | Request timeout (seconds) |
+| `--mlx-profile` | `HIGGS_MLX_PROFILE` | `auto` | MLX tuning profile: `auto`, `latency`, `balanced`, or `throughput` |
 | `--batch` | -- | `false` | Enable continuous batching |
 | `--kv-cache` | -- | `off` | KV cache mode: `off` or `turboquant` |
 | `--kv-bits` | -- | `3` | Default TurboQuant KV bit width |
@@ -102,11 +103,14 @@ Each profile gets isolated runtime files (`higgs.<profile>.pid`, `higgs.<profile
 | `--kv-adaptive-dense-layers` | -- | `0` | Keep the last N KV cache layers dense |
 | `--kv-seed` | -- | `0` | TurboQuant seed |
 
+`auto` resolves to `balanced` for small/medium models and `throughput` for large models.
+
 Additional simple-mode env toggles:
 - `HIGGS_ENABLE_THINKING=0|1` forces Qwen thinking on or off.
 - `HIGGS_CHUNKED_PREFILL_THRESHOLD` enables chunked prefill above a token threshold.
 - `HIGGS_CHUNKED_PREFILL_CHUNK_SIZE` controls the chunk size used during chunked prefill.
-- `HIGGS_MTP=1` enables Qwen3 speculative MTP only when conditions allow.
+- `HIGGS_MTP=0|1` overrides the tuning profile's speculative decode choice when conditions allow.
+- `HIGGS_CHUNKED_PREFILL_THRESHOLD`, `HIGGS_CHUNKED_PREFILL_CHUNK_SIZE`, and `HIGGS_CLEAR_CACHE_AFTER_PREFILL` override the selected MLX profile.
 - Qwen thinking budget is currently fixed at 256 tokens and not currently configurable.
 
 ### Gateway mode (config file)
@@ -121,10 +125,15 @@ port = 8000
 # timeout = 300.0
 # api_key = "sk-..."
 
+# --- Local defaults ---
+[local]
+mlx_profile = "auto"
+
 # --- Local models ---
 [[models]]
 path = "mlx-community/Llama-3.2-1B-Instruct-4bit"
 # name = "llama"     # optional friendly name (used as engine key and for auto_router lookup)
+# mlx_profile = "throughput"   # optional per-model override
 # batch = false
 # kv_cache = "turboquant"
 # kv_bits = 3
@@ -187,6 +196,29 @@ enabled = true
 # max_size_mb = 50
 # max_files = 5
 ```
+
+MLX profile precedence for local models:
+- `[[models]].mlx_profile`
+- `--mlx-profile`
+- `HIGGS_MLX_PROFILE`
+- `[local].mlx_profile`
+- built-in default `auto`
+
+### Benchmark-Driven Defaults
+
+`auto` is based on the benchmark harness in [benchmarks/bench_mlx_tuning.py](/Users/panbanda/conductor/workspaces/higgs/cape-town/benchmarks/bench_mlx_tuning.py), which scores:
+- weighted TTFT across short, medium, and long prompts
+- weighted decode throughput
+- short QA accuracy
+- long-context retrieval accuracy
+- structured-output correctness
+- prefix-cache speedup
+
+Benchmarks that informed the default:
+- `mlx-community/Qwen3-1.7B-4bit`: `balanced` won with `91.8` composite, `339 ms` weighted TTFT, `345.7 tok/s` decode, and `20.36x` prefix-cache speedup.
+- `mlx-community/Qwen3.6-35B-A3B-4bit`: `throughput` won with `95.7` composite, `842 ms` weighted TTFT, `119.2 tok/s` decode, and `56.19x` prefix-cache speedup.
+
+That is why `auto` resolves to `balanced` for small and medium models, and `throughput` for large and huge models.
 
 #### Provider options
 
@@ -317,6 +349,27 @@ These are concrete model IDs that have been used on this branch or are represent
 ## Performance
 
 All benchmarks on M4 Max 128GB. Temperature=0, warmup pass excluded.
+
+### MLX tuning benchmark
+
+Use the benchmark harness below to compare five serving iterations on the same local model:
+
+```bash
+python3 benchmarks/bench_mlx_tuning.py ~/.cache/lm-studio/models/mlx-community/Qwen3.6-35B-A3B-4bit
+```
+
+The harness scores:
+- TTFT and decode throughput across short, medium, and long prompts
+- long-context retrieval accuracy
+- structured-output correctness
+- prefix-cache speedup on a multi-turn conversation
+
+The five iterations are:
+- baseline
+- latency profile
+- balanced profile
+- throughput profile
+- throughput profile plus safe TurboQuant KV settings
 
 ### Decode throughput (tok/s)
 

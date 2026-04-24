@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
+use higgs_engine::mlx_tuning::resolve_effective_mlx_profile;
+
 use crate::config::HiggsConfig;
 use crate::model_resolver;
 
@@ -91,7 +93,28 @@ fn check_models(config: &HiggsConfig, result: &mut DoctorResult) {
             continue;
         }
         match model_resolver::resolve(&model.path) {
-            Ok(_) => pass(&format!("model {label} resolvable"), result),
+            Ok(resolved) => {
+                let requested_profile = model.requested_mlx_profile(&config.local);
+                let profile_msg = if model.batch {
+                    format!(
+                        "batch=true; requested mlx_profile={} (simple-engine tuning only)",
+                        requested_profile.as_str()
+                    )
+                } else {
+                    let effective_profile =
+                        resolve_effective_mlx_profile(&resolved, requested_profile);
+                    if effective_profile.as_str() == requested_profile.as_str() {
+                        format!("mlx_profile={}", effective_profile.as_str())
+                    } else {
+                        format!(
+                            "mlx_profile={} (requested {})",
+                            effective_profile.as_str(),
+                            requested_profile.as_str()
+                        )
+                    }
+                };
+                pass(&format!("model {label} resolvable ({profile_msg})"), result);
+            }
             Err(err) => fail(&format!("model {label} not found: {err}"), result),
         }
     }
@@ -355,6 +378,7 @@ mod tests {
                 ModelConfig {
                     path: "org/model-a".to_owned(),
                     name: None,
+                    mlx_profile: None,
                     batch: false,
                     kv_cache: higgs_models::turboquant::KvCacheMode::Off,
                     kv_bits: 3,
@@ -367,6 +391,7 @@ mod tests {
                 ModelConfig {
                     path: "org/model-b".to_owned(),
                     name: None,
+                    mlx_profile: None,
                     batch: false,
                     kv_cache: higgs_models::turboquant::KvCacheMode::Off,
                     kv_bits: 3,
@@ -392,6 +417,7 @@ mod tests {
                 ModelConfig {
                     path: "org/model-a".to_owned(),
                     name: None,
+                    mlx_profile: None,
                     batch: false,
                     kv_cache: higgs_models::turboquant::KvCacheMode::Off,
                     kv_bits: 3,
@@ -404,6 +430,7 @@ mod tests {
                 ModelConfig {
                     path: "org/model-a".to_owned(),
                     name: None,
+                    mlx_profile: None,
                     batch: false,
                     kv_cache: higgs_models::turboquant::KvCacheMode::Off,
                     kv_bits: 3,
@@ -659,6 +686,7 @@ mod tests {
             models: vec![ModelConfig {
                 path: "org/other-model".to_owned(),
                 name: None,
+                mlx_profile: None,
                 batch: false,
                 kv_cache: higgs_models::turboquant::KvCacheMode::Off,
                 kv_bits: 3,
@@ -688,6 +716,7 @@ mod tests {
             models: vec![ModelConfig {
                 path: "org/router-model".to_owned(),
                 name: None,
+                mlx_profile: None,
                 batch: false,
                 kv_cache: higgs_models::turboquant::KvCacheMode::Off,
                 kv_bits: 3,
@@ -719,6 +748,7 @@ mod tests {
             models: vec![ModelConfig {
                 path: "org/router-model".to_owned(),
                 name: None,
+                mlx_profile: None,
                 batch: false,
                 kv_cache: higgs_models::turboquant::KvCacheMode::Off,
                 kv_bits: 3,

@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use figment::{
     Figment,
     providers::{Env, Format, Serialized, Toml},
 };
+use higgs_engine::mlx_tuning::RequestedMlxProfile;
 use higgs_models::turboquant::{KvCacheConfig, KvCacheMode};
 use serde::{Deserialize, Serialize};
 
@@ -82,7 +83,7 @@ pub enum ConfigAction {
     Path,
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Default)]
 pub struct ServeArgs {
     /// Path to a model directory or `HuggingFace` model ID. May be repeated.
     #[arg(long = "model", action = clap::ArgAction::Append)]
@@ -111,6 +112,10 @@ pub struct ServeArgs {
     /// Default request timeout in seconds.
     #[arg(long)]
     pub timeout: Option<f64>,
+
+    /// MLX tuning profile for local simple-engine models.
+    #[arg(long, value_name = "PROFILE")]
+    pub mlx_profile: Option<MlxProfile>,
 
     /// Use batch engine for all models (simple mode only).
     #[arg(long)]
@@ -153,6 +158,8 @@ pub struct ServeArgs {
 pub struct HiggsConfig {
     #[serde(default)]
     pub server: ServerSection,
+    #[serde(default)]
+    pub local: LocalConfig,
     #[serde(default)]
     pub models: Vec<ModelConfig>,
     #[serde(default, rename = "provider")]
@@ -222,6 +229,67 @@ const fn default_max_body_size() -> usize {
     10 * 1024 * 1024
 }
 
+// -- Local defaults ---------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MlxProfile {
+    /// Use model-aware defaults (`auto` is `balanced` for small/medium, `throughput` for large/huge).
+    #[default]
+    Auto,
+    /// Alias for legacy env `ttft`; bias for lower TTFT and decoding startup.
+    Latency,
+    /// Balanced tuning target for mixed latency/throughput behavior.
+    Balanced,
+    /// Throughput-first tuning target.
+    Throughput,
+}
+
+impl MlxProfile {
+    /// Canonical profile string used for rendering and logs.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Latency => "latency",
+            Self::Balanced => "balanced",
+            Self::Throughput => "throughput",
+        }
+    }
+
+    /// Convert CLI/TOML profile into the internal requested profile.
+    pub const fn to_requested(self) -> RequestedMlxProfile {
+        match self {
+            Self::Auto => RequestedMlxProfile::Auto,
+            Self::Latency => RequestedMlxProfile::Latency,
+            Self::Balanced => RequestedMlxProfile::Balanced,
+            Self::Throughput => RequestedMlxProfile::Throughput,
+        }
+    }
+}
+
+/// Local config defaults applied before per-model overrides and env/CLI overlays.
+///
+/// `mlx_profile` is user-facing; `requested_mlx_profile` stores the resolved request
+/// after env/CLI fallback and is internal-only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalConfig {
+    /// Default MLX tuning profile for local simple-engine models.
+    #[serde(default)]
+    pub mlx_profile: MlxProfile,
+    /// Internal requested profile after resolving precedence (`model` > `--mlx-profile` > `HIGGS_MLX_PROFILE` > local default).
+    #[serde(skip, default)]
+    pub requested_mlx_profile: RequestedMlxProfile,
+}
+
+impl Default for LocalConfig {
+    fn default() -> Self {
+        Self {
+            mlx_profile: MlxProfile::Auto,
+            requested_mlx_profile: RequestedMlxProfile::Auto,
+        }
+    }
+}
+
 // -- Model config -----------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +299,9 @@ pub struct ModelConfig {
     /// Optional external name exposed to API clients.
     #[serde(default)]
     pub name: Option<String>,
+    /// Optional per-model MLX tuning override for the simple engine.
+    #[serde(default)]
+    pub mlx_profile: Option<MlxProfile>,
     /// Enable the separate batch engine for this model.
     #[serde(default)]
     pub batch: bool,
@@ -275,6 +346,13 @@ impl ModelConfig {
             norm_correction: self.kv_norm_correction,
             adaptive_dense_layers: self.kv_adaptive_dense_layers,
             seed: self.kv_seed,
+        }
+    }
+
+    pub const fn requested_mlx_profile(&self, local: &LocalConfig) -> RequestedMlxProfile {
+        match self.mlx_profile {
+            Some(profile) => profile.to_requested(),
+            None => local.requested_mlx_profile,
         }
     }
 }
@@ -448,6 +526,31 @@ const fn default_retention_minutes() -> u64 {
     60
 }
 
+fn env_requested_mlx_profile() -> Result<Option<RequestedMlxProfile>, String> {
+    // Env-only aliases are accepted here (baseline/default/off, ttft, tps) and
+    // intentionally not exposed through CLI/TOML `MlxProfile`.
+    RequestedMlxProfile::from_env_raw(std::env::var("HIGGS_MLX_PROFILE").ok().as_deref())
+}
+
+fn resolve_local_requested_mlx_profile(
+    config_profile: MlxProfile,
+    cli_profile: Option<MlxProfile>,
+) -> Result<RequestedMlxProfile, String> {
+    Ok(cli_profile
+        .map(MlxProfile::to_requested)
+        .or(env_requested_mlx_profile()?)
+        .unwrap_or_else(|| config_profile.to_requested()))
+}
+
+fn apply_requested_mlx_profile(
+    config: &mut HiggsConfig,
+    cli_profile: Option<MlxProfile>,
+) -> Result<(), String> {
+    config.local.requested_mlx_profile =
+        resolve_local_requested_mlx_profile(config.local.mlx_profile, cli_profile)?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Config loading
 // ---------------------------------------------------------------------------
@@ -466,6 +569,7 @@ pub fn build_simple_config(args: &ServeArgs) -> Result<HiggsConfig, String> {
         .map(|p| ModelConfig {
             path: p.clone(),
             name: None,
+            mlx_profile: None,
             batch: args.batch,
             kv_cache,
             kv_bits: args.kv_bits.unwrap_or(default_kv_bits()),
@@ -508,6 +612,7 @@ pub fn build_simple_config(args: &ServeArgs) -> Result<HiggsConfig, String> {
         server.timeout = timeout;
     }
     config.server = server;
+    apply_requested_mlx_profile(&mut config, args.mlx_profile)?;
 
     validate_config(&config, true)?;
     ensure_auto_router_model(&mut config);
@@ -551,6 +656,7 @@ pub fn load_config_file(path: &Path, args: Option<&ServeArgs>) -> Result<HiggsCo
                 .map(|p| ModelConfig {
                     path: p.clone(),
                     name: None,
+                    mlx_profile: None,
                     batch: serve_args.batch,
                     kv_cache,
                     kv_bits: serve_args.kv_bits.unwrap_or(default_kv_bits()),
@@ -573,6 +679,10 @@ pub fn load_config_file(path: &Path, args: Option<&ServeArgs>) -> Result<HiggsCo
     let mut config: HiggsConfig = figment
         .extract()
         .map_err(|e| format!("failed to load config from {}: {e}", path.display()))?;
+    apply_requested_mlx_profile(
+        &mut config,
+        args.and_then(|serve_args| serve_args.mlx_profile),
+    )?;
 
     validate_config(&config, false)?;
     ensure_auto_router_model(&mut config);
@@ -680,6 +790,7 @@ fn ensure_auto_router_model(config: &mut HiggsConfig) {
     config.models.push(ModelConfig {
         path,
         name: Some(name.clone()),
+        mlx_profile: None,
         batch: false,
         kv_cache: KvCacheMode::Off,
         kv_bits: default_kv_bits(),
@@ -795,6 +906,30 @@ pub type ServerConfig = ServerSection;
 mod tests {
     use super::*;
 
+    #[allow(unsafe_code)]
+    fn with_env_var<R>(key: &str, desired_value: Option<&str>, f: impl FnOnce() -> R) -> R {
+        let _guard = crate::test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::var(key).ok();
+        match desired_value {
+            Some(new_value) => unsafe { std::env::set_var(key, new_value) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+
+        match previous.as_deref() {
+            Some(previous_value) => unsafe { std::env::set_var(key, previous_value) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+
+        match result {
+            Ok(output) => output,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
     #[test]
     fn test_default_higgs_config() {
         let config = HiggsConfig::default();
@@ -807,6 +942,11 @@ mod tests {
         assert!((config.server.timeout - 300.0).abs() < f64::EPSILON);
         assert!(config.server.api_key.is_none());
         assert_eq!(config.server.rate_limit, 0);
+        assert_eq!(config.local.mlx_profile, MlxProfile::Auto);
+        assert_eq!(
+            config.local.requested_mlx_profile,
+            RequestedMlxProfile::Auto
+        );
         assert_eq!(config.default.provider, "higgs");
     }
 
@@ -820,6 +960,7 @@ mod tests {
             api_key: None,
             rate_limit: None,
             timeout: None,
+            mlx_profile: None,
             batch: true,
             kv_cache: None,
             kv_bits: None,
@@ -848,6 +989,7 @@ mod tests {
             api_key: Some("sk-test".to_owned()),
             rate_limit: Some(60),
             timeout: Some(60.0),
+            mlx_profile: None,
             batch: false,
             kv_cache: None,
             kv_bits: None,
@@ -876,6 +1018,7 @@ mod tests {
             api_key: None,
             rate_limit: None,
             timeout: None,
+            mlx_profile: None,
             batch: false,
             kv_cache: Some("turboquant".to_owned()),
             kv_bits: Some(4),
@@ -902,6 +1045,7 @@ mod tests {
             api_key: None,
             rate_limit: None,
             timeout: None,
+            mlx_profile: None,
             batch: false,
             kv_cache: None,
             kv_bits: None,
@@ -924,6 +1068,7 @@ mod tests {
             api_key: None,
             rate_limit: None,
             timeout: None,
+            mlx_profile: None,
             batch: false,
             kv_cache: None,
             kv_bits: None,
@@ -946,6 +1091,7 @@ mod tests {
             api_key: None,
             rate_limit: None,
             timeout: None,
+            mlx_profile: None,
             batch: false,
             kv_cache: None,
             kv_bits: None,
@@ -968,6 +1114,7 @@ mod tests {
             api_key: None,
             rate_limit: None,
             timeout: None,
+            mlx_profile: None,
             batch: true,
             kv_cache: Some("turboquant".to_owned()),
             kv_bits: Some(3),
@@ -1278,6 +1425,7 @@ mod tests {
             api_key: None,
             rate_limit: None,
             timeout: Some(-1.0),
+            mlx_profile: None,
             batch: false,
             kv_cache: None,
             kv_bits: None,
@@ -1315,6 +1463,7 @@ mod tests {
             api_key: None,
             rate_limit: None,
             timeout: None,
+            mlx_profile: None,
             batch: false,
             kv_cache: None,
             kv_bits: None,
@@ -1351,6 +1500,179 @@ mod tests {
         assert_eq!(model.kv_cache, KvCacheMode::Turboquant);
         assert_eq!(model.kv_bits, 4);
         assert_eq!(model.kv_seed, 123);
+    }
+
+    #[test]
+    fn test_config_file_parses_local_and_model_mlx_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+            [local]
+            mlx_profile = "auto"
+
+            [[models]]
+            path = "some/model"
+            mlx_profile = "throughput"
+            "#,
+        )
+        .unwrap();
+
+        let config = load_config_file(&path, None).unwrap();
+        assert_eq!(config.local.mlx_profile, MlxProfile::Auto);
+        assert_eq!(
+            config.local.requested_mlx_profile,
+            RequestedMlxProfile::Auto
+        );
+        let model = config.models.first().unwrap();
+        assert_eq!(model.mlx_profile, Some(MlxProfile::Throughput));
+        assert_eq!(
+            model.requested_mlx_profile(&config.local),
+            RequestedMlxProfile::Throughput
+        );
+    }
+
+    #[test]
+    fn test_config_file_rejects_baseline_local_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+            [local]
+            mlx_profile = "baseline"
+
+            [[models]]
+            path = "some/model"
+            "#,
+        )
+        .unwrap();
+
+        assert!(load_config_file(&path, None).is_err());
+    }
+
+    #[test]
+    fn test_config_file_rejects_baseline_model_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+            [local]
+            mlx_profile = "auto"
+
+            [[models]]
+            path = "some/model"
+            mlx_profile = "baseline"
+            "#,
+        )
+        .unwrap();
+
+        assert!(load_config_file(&path, None).is_err());
+    }
+
+    #[test]
+    fn test_mlx_profile_parse_rejects_baseline() {
+        assert!(MlxProfile::from_str("baseline", true).is_err());
+    }
+
+    #[test]
+    fn test_mlx_profile_env_overrides_local_default() {
+        with_env_var("HIGGS_MLX_PROFILE", Some("throughput"), || {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            std::fs::write(
+                &path,
+                r#"
+                [local]
+                mlx_profile = "balanced"
+
+                [[models]]
+                path = "some/model"
+                "#,
+            )
+            .unwrap();
+
+            let config = load_config_file(&path, None).unwrap();
+            assert_eq!(config.local.mlx_profile, MlxProfile::Balanced);
+            assert_eq!(
+                config.local.requested_mlx_profile,
+                RequestedMlxProfile::Throughput
+            );
+            assert_eq!(
+                config
+                    .models
+                    .first()
+                    .unwrap()
+                    .requested_mlx_profile(&config.local),
+                RequestedMlxProfile::Throughput
+            );
+        });
+    }
+
+    #[test]
+    fn test_mlx_profile_cli_overrides_env_and_config_default() {
+        with_env_var("HIGGS_MLX_PROFILE", Some("balanced"), || {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            std::fs::write(
+                &path,
+                r#"
+                [local]
+                mlx_profile = "throughput"
+
+                [[models]]
+                path = "some/model"
+                "#,
+            )
+            .unwrap();
+
+            let args = ServeArgs {
+                mlx_profile: Some(MlxProfile::Latency),
+                ..ServeArgs::default()
+            };
+            let config = load_config_file(&path, Some(&args)).unwrap();
+            assert_eq!(config.local.mlx_profile, MlxProfile::Throughput);
+            assert_eq!(
+                config.local.requested_mlx_profile,
+                RequestedMlxProfile::Latency
+            );
+        });
+    }
+
+    #[test]
+    fn test_model_mlx_profile_override_beats_cli_env_and_local() {
+        with_env_var("HIGGS_MLX_PROFILE", Some("throughput"), || {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            std::fs::write(
+                &path,
+                r#"
+                [local]
+                mlx_profile = "balanced"
+
+                [[models]]
+                path = "some/model"
+                mlx_profile = "latency"
+                "#,
+            )
+            .unwrap();
+
+            let args = ServeArgs {
+                mlx_profile: Some(MlxProfile::Auto),
+                ..ServeArgs::default()
+            };
+            let config = load_config_file(&path, Some(&args)).unwrap();
+            assert_eq!(
+                config
+                    .models
+                    .first()
+                    .unwrap()
+                    .requested_mlx_profile(&config.local),
+                RequestedMlxProfile::Latency
+            );
+        });
     }
 
     #[test]

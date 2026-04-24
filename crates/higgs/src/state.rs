@@ -5,6 +5,7 @@ use higgs_engine::batch_engine::BatchEngine;
 use higgs_engine::chat_template::ChatMessage;
 use higgs_engine::engine::{GenerationOutput, StreamingOutput};
 use higgs_engine::error::EngineError;
+use higgs_engine::mlx_tuning::MlxRuntimeTuning;
 use higgs_engine::simple::SimpleEngine;
 use higgs_engine::tokenizers::Tokenizer;
 use higgs_models::SamplingParams;
@@ -28,8 +29,9 @@ impl Engine {
     pub fn load_simple<P: AsRef<Path>>(
         dir: P,
         kv_cache_config: KvCacheConfig,
+        tuning: MlxRuntimeTuning,
     ) -> Result<Self, EngineError> {
-        SimpleEngine::load(dir, kv_cache_config).map(|e| Self::Simple(Box::new(e)))
+        SimpleEngine::load(dir, kv_cache_config, tuning).map(|e| Self::Simple(Box::new(e)))
     }
 
     pub fn load_batch<P: AsRef<Path>>(
