@@ -204,6 +204,22 @@ MLX profile precedence for local models:
 - `[local].mlx_profile`
 - built-in default `auto`
 
+### Benchmark-Driven Defaults
+
+`auto` is based on the benchmark harness in [benchmarks/bench_mlx_tuning.py](/Users/panbanda/conductor/workspaces/higgs/cape-town/benchmarks/bench_mlx_tuning.py), which scores:
+- weighted TTFT across short, medium, and long prompts
+- weighted decode throughput
+- short QA accuracy
+- long-context retrieval accuracy
+- structured-output correctness
+- prefix-cache speedup
+
+Benchmarks that informed the default:
+- `mlx-community/Qwen3-1.7B-4bit`: `balanced` won with `91.8` composite, `339 ms` weighted TTFT, `345.7 tok/s` decode, and `20.36x` prefix-cache speedup.
+- `mlx-community/Qwen3.6-35B-A3B-4bit`: `throughput` won with `95.7` composite, `842 ms` weighted TTFT, `119.2 tok/s` decode, and `56.19x` prefix-cache speedup.
+
+That is why `auto` resolves to `balanced` for small and medium models, and `throughput` for large and huge models.
+
 #### Provider options
 
 | Field | Type | Default | Description |
