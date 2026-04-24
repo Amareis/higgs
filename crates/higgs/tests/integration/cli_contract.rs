@@ -153,6 +153,8 @@ fn attach_requires_metrics_logging() {
 #[test]
 fn stop_force_kills_term_ignoring_process() {
     let dir = tempfile::tempdir().unwrap();
+    // Keep the shell alive as the parent so the TERM-ignoring child can be
+    // reaped without reintroducing the PID-reuse race from the old fixture.
     let mut child = Command::new("sh")
         .args([
             "-c",
