@@ -191,7 +191,7 @@ pub struct SimpleEngine {
     model: Mutex<AnyModel>,
     prefix_cache: Mutex<PagedPrefixCache>,
     /// Paged KV cache for session-based generation
-    paged_cache: Mutex<PagedKvCache>,
+    paged_cache: Option<Mutex<PagedKvCache>>,
     /// Session scheduler for continuous batching
     scheduler: Mutex<RoundRobinScheduler>,
     /// Active sessions
@@ -353,24 +353,25 @@ impl SimpleEngine {
             .map_err(|_| EngineError::Generation("paged cache num_kv_heads overflow".to_owned()))?;
         let head_dim = usize::try_from(raw_head_dim)
             .map_err(|_| EngineError::Generation("paged cache head_dim overflow".to_owned()))?;
-        let num_blocks = if experimental_paged_kv {
-            estimate_paged_kv_blocks(
+        let paged_cache = if experimental_paged_kv {
+            let num_blocks = estimate_paged_kv_blocks(
                 tuning.paged_kv_target_bytes(),
                 num_kv_heads,
                 head_dim,
                 DEFAULT_PAGED_KV_BLOCK_SIZE,
+            );
+            Some(
+                PagedKvCache::new(
+                    num_blocks,
+                    DEFAULT_PAGED_KV_BLOCK_SIZE,
+                    num_kv_heads,
+                    head_dim,
+                )
+                .map_err(|e| EngineError::Generation(format!("paged cache init: {e}")))?,
             )
         } else {
-            0
+            None
         };
-
-        let paged_cache = PagedKvCache::new(
-            num_blocks,
-            DEFAULT_PAGED_KV_BLOCK_SIZE,
-            num_kv_heads,
-            head_dim,
-        )
-        .map_err(|e| EngineError::Generation(format!("paged cache init: {e}")))?;
 
         Ok(Self {
             model: Mutex::new(model),
@@ -378,7 +379,7 @@ impl SimpleEngine {
                 DEFAULT_PREFIX_CACHE_SIZE,
                 DEFAULT_BLOCK_SIZE,
             )),
-            paged_cache: Mutex::new(paged_cache),
+            paged_cache: paged_cache.map(Mutex::new),
             scheduler: Mutex::new(RoundRobinScheduler::new()),
             sessions: Mutex::new(std::collections::HashMap::new()),
             tokenizer,
@@ -792,13 +793,14 @@ impl SimpleEngine {
     pub fn remove_session(&self, session_id: u64) -> Result<(), EngineError> {
         let mut scheduler = lock_or_recover(&self.scheduler);
         let mut sessions = lock_or_recover(&self.sessions);
-        let mut paged_cache = lock_or_recover(&self.paged_cache);
-
         sessions.remove(&session_id);
         scheduler.remove(session_id);
-        paged_cache
-            .remove_session(session_id)
-            .map_err(|e| EngineError::Generation(format!("Failed to remove session: {e}")))?;
+        if let Some(paged_cache_mutex) = &self.paged_cache {
+            let mut paged_cache = lock_or_recover(paged_cache_mutex);
+            paged_cache
+                .remove_session(session_id)
+                .map_err(|e| EngineError::Generation(format!("Failed to remove session: {e}")))?;
+        }
 
         Ok(())
     }

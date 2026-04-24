@@ -6,13 +6,21 @@ BIN="${HIGGS_BIN:-$ROOT/target/debug/higgs}"
 TMP_DIR="${TMPDIR:-/tmp}/higgs-smoke.$$"
 mkdir -p "$TMP_DIR"
 
-MODELS=(
+DEFAULT_MODELS=(
   "mlx-community/Llama-3.2-1B-Instruct-4bit"
   "mlx-community/Qwen2.5-3B-Instruct-4bit"
   "mlx-community/Qwen3-1.7B-4bit"
   "mlx-community/Qwen3-Coder-Next-4bit"
+)
+
+OPTIONAL_MODELS=(
   "mlx-community/Qwen3.6-35B-A3B-4bit"
 )
+
+MODELS=("${DEFAULT_MODELS[@]}")
+if [[ "${HIGGS_SMOKE_INCLUDE_OPTIONAL_MODELS:-0}" == "1" ]]; then
+  MODELS+=("${OPTIONAL_MODELS[@]}")
+fi
 
 cleanup_pid=""
 cleanup() {
@@ -215,6 +223,10 @@ main() {
   require_cmd curl
   require_cmd grep
   require_cmd script
+
+  if [[ "${HIGGS_SMOKE_INCLUDE_OPTIONAL_MODELS:-0}" == "1" ]]; then
+    echo "including optional cached models in smoke matrix"
+  fi
 
   for model in "${MODELS[@]}"; do
     require_cached_model "$model"

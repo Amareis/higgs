@@ -266,12 +266,25 @@ fn check_health(config: &HiggsConfig) -> Result<(), String> {
             "daemon health probe failed for {addr}: unexpected response status"
         ));
     }
-    if !response.contains("\"status\":\"ok\"") {
+    if !health_response_is_ok(&response) {
         return Err(format!(
             "daemon health probe failed for {addr}: unexpected response body"
         ));
     }
     Ok(())
+}
+
+fn health_response_is_ok(response: &str) -> bool {
+    let Some((_, body)) = response.split_once("\r\n\r\n") else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| status == "ok")
 }
 
 fn ensure_reachable(config: &HiggsConfig) -> Result<String, String> {
@@ -838,5 +851,24 @@ mod tests {
     fn resolve_host_passes_through_other() {
         assert_eq!(resolve_host("10.0.0.1"), "10.0.0.1");
         assert_eq!(resolve_host("127.0.0.1"), "127.0.0.1");
+    }
+
+    #[test]
+    fn health_response_is_ok_parses_json_body() {
+        let response =
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"status\":\"ok\"}";
+        assert!(health_response_is_ok(response));
+    }
+
+    #[test]
+    fn health_response_is_ok_handles_pretty_printed_body() {
+        let response = "HTTP/1.1 200 OK\r\nx-upstream-status: {\"status\":\"ok\"}\r\n\r\n{\n  \"status\": \"ok\"\n}";
+        assert!(health_response_is_ok(response));
+    }
+
+    #[test]
+    fn health_response_is_ok_rejects_non_ok_status() {
+        let response = "HTTP/1.1 200 OK\r\n\r\n{\"status\":\"down\"}";
+        assert!(!health_response_is_ok(response));
     }
 }

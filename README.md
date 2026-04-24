@@ -215,6 +215,7 @@ Measured on DeepSeek-V2-Lite-4bit with global batch sorting before `gather_qmm`.
 ## Release Validation
 
 - Run `scripts/release_smoke_cached_models.sh` to validate the cached MLX models already present on the machine without downloading anything.
+- Set `HIGGS_SMOKE_INCLUDE_OPTIONAL_MODELS=1` to include optional large/private cached models like `mlx-community/Qwen3.6-35B-A3B-4bit`.
 - The harness covers single-model serve, streaming and non-streaming requests, multi-model startup, routing precedence, daemon start/attach/stop, and the batch-support guardrails.
 - The current smoke matrix exercised these cached models on this machine: `mlx-community/Llama-3.2-1B-Instruct-4bit`, `mlx-community/Qwen2.5-3B-Instruct-4bit`, `mlx-community/Qwen3-1.7B-4bit`, `mlx-community/Qwen3-Coder-Next-4bit`, and `mlx-community/Qwen3.6-35B-A3B-4bit`.
 

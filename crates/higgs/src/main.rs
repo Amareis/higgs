@@ -4,6 +4,8 @@ use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
+use std::time::SystemTime;
 
 use clap::Parser;
 use higgs_engine::mlx_tuning::resolve_runtime_tuning;
@@ -372,7 +374,7 @@ fn derive_profile_dir(exe: &Path) -> Option<PathBuf> {
 fn newest_metallib_candidate(profile_dir: &Path) -> Option<PathBuf> {
     let build_dir = profile_dir.join("build");
     let entries = fs::read_dir(build_dir).ok()?;
-    let mut candidates: Vec<PathBuf> = entries
+    let candidates = entries
         .flatten()
         .filter_map(|entry| {
             let name = entry.file_name();
@@ -383,11 +385,31 @@ fn newest_metallib_candidate(profile_dir: &Path) -> Option<PathBuf> {
                 return None;
             }
             let candidate = entry.path().join("out/build/lib/mlx.metallib");
-            candidate.exists().then_some(candidate)
+            candidate.exists().then(|| {
+                (
+                    fs::metadata(&candidate)
+                        .and_then(|meta| meta.modified())
+                        .ok(),
+                    candidate,
+                )
+            })
         })
         .collect();
-    candidates.sort_by_key(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok());
-    candidates.pop()
+    select_latest_metallib_candidate(candidates)
+}
+
+#[cfg(target_os = "macos")]
+fn select_latest_metallib_candidate(
+    candidates: Vec<(Option<SystemTime>, PathBuf)>,
+) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .max_by(|(left_time, left_path), (right_time, right_path)| {
+            left_time
+                .cmp(right_time)
+                .then_with(|| left_path.cmp(right_path))
+        })
+        .map(|(_, path)| path)
 }
 
 fn cmd_config(cli: &Cli, action: &ConfigAction) {
@@ -425,4 +447,36 @@ fn init_tracing(verbose: bool) {
             }),
         )
         .init();
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[allow(clippy::panic, clippy::unwrap_used, clippy::tests_outside_test_module)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_latest_metallib_candidate_prefers_newest_timestamp() {
+        let older = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10);
+        let newer = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(20);
+        let first = PathBuf::from("/tmp/mlx-sys-a/out/build/lib/mlx.metallib");
+        let second = PathBuf::from("/tmp/mlx-sys-b/out/build/lib/mlx.metallib");
+
+        let selected = select_latest_metallib_candidate(vec![
+            (Some(older), first),
+            (Some(newer), second.clone()),
+        ]);
+
+        assert_eq!(selected, Some(second));
+    }
+
+    #[test]
+    fn select_latest_metallib_candidate_breaks_none_ties_by_path() {
+        let first = PathBuf::from("/tmp/mlx-sys-a/out/build/lib/mlx.metallib");
+        let second = PathBuf::from("/tmp/mlx-sys-b/out/build/lib/mlx.metallib");
+
+        let selected =
+            select_latest_metallib_candidate(vec![(None, first), (None, second.clone())]);
+
+        assert_eq!(selected, Some(second));
+    }
 }

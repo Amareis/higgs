@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 
 use crate::config;
@@ -38,6 +39,7 @@ pub fn config_set(config_path: &Path, key: &str, value: &str) {
         std::process::exit(1);
     }
 
+    let original_exists = config_path.exists();
     let original = fs::read_to_string(config_path).unwrap_or_default();
     let mut doc: toml_edit::DocumentMut = original.parse().unwrap_or_else(|e| {
         eprintln!("failed to parse {}: {e}", config_path.display());
@@ -77,9 +79,25 @@ pub fn config_set(config_path: &Path, key: &str, value: &str) {
         let bootstrap_error =
             err.contains("config must define at least one [[models]] entry or [provider.*]");
         if !bootstrap_error {
-            let _ = fs::write(config_path, original);
+            let _ = restore_original_config(config_path, &original, original_exists);
             eprintln!("refusing to keep invalid config after setting {key}: {err}");
             std::process::exit(1);
+        }
+    }
+}
+
+fn restore_original_config(
+    config_path: &Path,
+    original: &str,
+    original_exists: bool,
+) -> std::io::Result<()> {
+    if original_exists {
+        fs::write(config_path, original)
+    } else {
+        match fs::remove_file(config_path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
         }
     }
 }
@@ -200,5 +218,27 @@ mod tests {
         let toml = "[server]\nport = 3100\n";
         let err = config_lookup(toml, "server").unwrap_err();
         assert!(err.contains("table, not a value"));
+    }
+
+    #[test]
+    fn restore_original_config_rewrites_existing_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "invalid = [\n").unwrap();
+
+        restore_original_config(&path, "original = true\n", true).unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original = true\n");
+    }
+
+    #[test]
+    fn restore_original_config_removes_new_file_when_original_missing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "invalid = [\n").unwrap();
+
+        restore_original_config(&path, "", false).unwrap();
+
+        assert!(!path.exists());
     }
 }
