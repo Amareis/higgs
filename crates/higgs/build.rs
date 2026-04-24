@@ -3,10 +3,11 @@ use std::{env, fs, path::PathBuf};
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
+    let is_ci = env::var("CI").is_ok_and(|v| v == "true");
     let is_macos = env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "macos");
 
     if let Err(reason) = copy_metallib() {
-        if is_macos {
+        if is_macos && !is_ci {
             println!("cargo:warning=failed to set up mlx.metallib: {reason}");
         }
     }
