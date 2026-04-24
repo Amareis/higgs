@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.22](https://github.com/panbanda/higgs/compare/higgs-models-v0.1.21...higgs-models-v0.1.22) (2026-04-24)
+
+
+### Bug Fixes
+
+* align turboquant tests with rand 0.10 ([d0617c4](https://github.com/panbanda/higgs/commit/d0617c495f4d81f941492c247e45c4b91c996236))
+* gate rng import to tests ([1161eaa](https://github.com/panbanda/higgs/commit/1161eaa5c81f11fd736527525abcf2327e604e48))
+* restore rng import and checkout pin ([8771fa0](https://github.com/panbanda/higgs/commit/8771fa00c7d0a3f1fd83fd55594c441c95e214ba))
+
 ## [0.1.21](https://github.com/panbanda/higgs/compare/higgs-models-v0.1.20...higgs-models-v0.1.21) (2026-04-24)
 
 
