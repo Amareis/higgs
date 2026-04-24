@@ -44,6 +44,8 @@ Install:
 brew install panbanda/brews/higgs
 ```
 
+The Homebrew release currently targets Apple Silicon (`aarch64-apple-darwin`).
+
 Or build from source (Rust 1.88.0+, Xcode CLI Tools):
 
 ```bash
