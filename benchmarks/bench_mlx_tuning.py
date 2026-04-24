@@ -388,6 +388,47 @@ def normalize_text(text: str) -> str:
     return " ".join(text.strip().split()).lower()
 
 
+def clamp_cache_speedup(speedup: float, cap: float = CACHE_SPEEDUP_CAP) -> float:
+    return min(speedup, cap)
+
+
+def compute_accuracy_score(result: dict[str, Any]) -> float:
+    qa_acc = result["qa"]["accuracy"]
+    long_acc = result["long_context"]["accuracy"]
+    structured_acc = result["structured_output"]["accuracy"]
+    cache_acc = result["prefix_cache"]["accuracy"]
+    return (qa_acc * 0.45) + (long_acc * 0.25) + (structured_acc * 0.15) + (cache_acc * 0.15)
+
+
+def compute_speed_score(result: dict[str, Any], best_ttft: float, best_decode: float) -> float:
+    ttft_score = best_ttft / result["prompt_sweep"]["weighted_ttft_ms"] if best_ttft else 0.0
+    decode_score = (
+        result["prompt_sweep"]["weighted_decode_tps"] / best_decode if best_decode else 0.0
+    )
+    return (ttft_score * 0.55) + (decode_score * 0.45)
+
+
+def compute_iteration_score(result: dict[str, Any], best_ttft: float, best_decode: float, best_cache: float) -> dict[str, float]:
+    accuracy = compute_accuracy_score(result)
+    speed = compute_speed_score(result, best_ttft, best_decode)
+    cache_speedup = (
+        clamp_cache_speedup(result["prefix_cache"]["speedup"])
+        if result["prefix_cache"]["passed"]
+        else 0.0
+    )
+    cache_score = cache_speedup / best_cache if best_cache else 0.0
+    return {
+        "accuracy": accuracy,
+        "speed": speed,
+        "cache": cache_score,
+        "composite": 100.0 * ((accuracy * 0.45) + (speed * 0.45) + (cache_score * 0.10)),
+    }
+
+
+def rank_results_by_score(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(results, key=lambda r: r["score"]["composite"], reverse=True)
+
+
 def prompt_sweep(model: str, repeats: int) -> dict[str, Any]:
     prompts = {
         "short": SHORT_PROMPT,
@@ -615,34 +656,11 @@ def score_results(results: list[dict[str, Any]]) -> None:
     )
 
     for result in results:
-        qa_acc = result["qa"]["accuracy"]
-        long_acc = result["long_context"]["accuracy"]
-        structured_acc = result["structured_output"]["accuracy"]
-        cache_acc = result["prefix_cache"]["accuracy"]
-        accuracy = (qa_acc * 0.45) + (long_acc * 0.25) + (structured_acc * 0.15) + (cache_acc * 0.15)
-
-        ttft_score = best_ttft / result["prompt_sweep"]["weighted_ttft_ms"]
-        decode_score = result["prompt_sweep"]["weighted_decode_tps"] / best_decode if best_decode else 0.0
-        speed_score = (ttft_score * 0.55) + (decode_score * 0.45)
-
-        cache_speedup = (
-            min(result["prefix_cache"]["speedup"], CACHE_SPEEDUP_CAP)
-            if result["prefix_cache"]["passed"]
-            else 0.0
-        )
-        cache_score = cache_speedup / best_cache if best_cache else 0.0
-        composite = 100.0 * ((accuracy * 0.45) + (speed_score * 0.45) + (cache_score * 0.10))
-
-        result["score"] = {
-            "accuracy": accuracy,
-            "speed": speed_score,
-            "cache": cache_score,
-            "composite": composite,
-        }
+        result["score"] = compute_iteration_score(result, best_ttft, best_decode, best_cache)
 
 
 def print_summary(results: list[dict[str, Any]]) -> None:
-    ordered = sorted(results, key=lambda r: r["score"]["composite"], reverse=True)
+    ordered = rank_results_by_score(results)
     log(f"\n{'#' * 80}")
     log("FINAL SUMMARY")
     log(f"{'#' * 80}")
