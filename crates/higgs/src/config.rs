@@ -243,8 +243,6 @@ pub enum MlxProfile {
     Balanced,
     /// Throughput-first tuning target.
     Throughput,
-    /// Preserve baseline/legacy behavior; available for CLI and config parity with env aliases.
-    Baseline,
 }
 
 impl MlxProfile {
@@ -255,7 +253,6 @@ impl MlxProfile {
             Self::Latency => "latency",
             Self::Balanced => "balanced",
             Self::Throughput => "throughput",
-            Self::Baseline => "baseline",
         }
     }
 
@@ -266,7 +263,6 @@ impl MlxProfile {
             Self::Latency => RequestedMlxProfile::Latency,
             Self::Balanced => RequestedMlxProfile::Balanced,
             Self::Throughput => RequestedMlxProfile::Throughput,
-            Self::Baseline => RequestedMlxProfile::Baseline,
         }
     }
 }
@@ -531,6 +527,8 @@ const fn default_retention_minutes() -> u64 {
 }
 
 fn env_requested_mlx_profile() -> Result<Option<RequestedMlxProfile>, String> {
+    // Env-only aliases are accepted here (baseline/default/off, ttft, tps) and
+    // intentionally not exposed through CLI/TOML `MlxProfile`.
     RequestedMlxProfile::from_env_raw(std::env::var("HIGGS_MLX_PROFILE").ok().as_deref())
 }
 
@@ -1536,7 +1534,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_file_allows_baseline_local_profile() {
+    fn test_config_file_rejects_baseline_local_profile() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(
@@ -1551,12 +1549,32 @@ mod tests {
         )
         .unwrap();
 
-        let config = load_config_file(&path, None).unwrap();
-        assert_eq!(config.local.mlx_profile, MlxProfile::Baseline);
-        assert_eq!(
-            config.local.requested_mlx_profile,
-            RequestedMlxProfile::Baseline
-        );
+        assert!(load_config_file(&path, None).is_err());
+    }
+
+    #[test]
+    fn test_config_file_rejects_baseline_model_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+            [local]
+            mlx_profile = "auto"
+
+            [[models]]
+            path = "some/model"
+            mlx_profile = "baseline"
+            "#,
+        )
+        .unwrap();
+
+        assert!(load_config_file(&path, None).is_err());
+    }
+
+    #[test]
+    fn test_mlx_profile_parse_rejects_baseline() {
+        assert!(MlxProfile::from_str("baseline", true).is_err());
     }
 
     #[test]
