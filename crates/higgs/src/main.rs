@@ -334,7 +334,7 @@ fn ensure_local_runtime_ready(config: &HiggsConfig) -> Result<(), Box<dyn std::e
         }
         if !metallib.exists() {
             return Err(format!(
-                "mlx.metallib not found next to executable at {}\nhint: rebuild Higgs or use a release artifact that bundles mlx.metallib",
+                "mlx.metallib not found next to executable at {}\nhint: rebuild Higgs, reinstall the Apple Silicon Homebrew package, or use a release artifact that bundles mlx.metallib",
                 metallib.display()
             )
             .into());
