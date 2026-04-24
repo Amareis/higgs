@@ -8,9 +8,10 @@
 )]
 
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn higgs_bin() -> std::path::PathBuf {
@@ -27,6 +28,11 @@ fn higgs_bin() -> std::path::PathBuf {
 
 fn write_config(dir: &Path, contents: &str) {
     fs::write(dir.join("config.toml"), contents).unwrap();
+}
+
+fn unused_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
 }
 
 fn gateway_config(port: u16, metrics_enabled: bool, metrics_path: &Path) -> String {
@@ -85,7 +91,10 @@ fn shellenv_fails_on_invalid_config() {
 fn shellenv_fails_when_server_not_running() {
     let dir = tempfile::tempdir().unwrap();
     let metrics_path = dir.path().join("metrics.jsonl");
-    write_config(dir.path(), &gateway_config(6553, true, &metrics_path));
+    write_config(
+        dir.path(),
+        &gateway_config(unused_port(), true, &metrics_path),
+    );
 
     let output = Command::new(higgs_bin())
         .arg("shellenv")
@@ -102,7 +111,10 @@ fn shellenv_fails_when_server_not_running() {
 fn attach_requires_live_daemon() {
     let dir = tempfile::tempdir().unwrap();
     let metrics_path = dir.path().join("metrics.jsonl");
-    write_config(dir.path(), &gateway_config(6554, true, &metrics_path));
+    write_config(
+        dir.path(),
+        &gateway_config(unused_port(), true, &metrics_path),
+    );
 
     let output = Command::new(higgs_bin())
         .arg("attach")
@@ -119,7 +131,10 @@ fn attach_requires_live_daemon() {
 fn attach_requires_metrics_logging() {
     let dir = tempfile::tempdir().unwrap();
     let metrics_path = dir.path().join("metrics.jsonl");
-    write_config(dir.path(), &gateway_config(6555, false, &metrics_path));
+    write_config(
+        dir.path(),
+        &gateway_config(unused_port(), false, &metrics_path),
+    );
 
     let output = Command::new(higgs_bin())
         .arg("attach")
@@ -138,17 +153,20 @@ fn attach_requires_metrics_logging() {
 #[test]
 fn stop_force_kills_term_ignoring_process() {
     let dir = tempfile::tempdir().unwrap();
-    let child = Command::new("sh")
+    let mut child = Command::new("sh")
         .args([
             "-c",
-            "perl -e '$SIG{TERM} = q(IGNORE); sleep 60' >/dev/null 2>&1 & echo $!",
+            "perl -e '$SIG{TERM} = q(IGNORE); sleep 60' >/dev/null 2>&1 & printf '%s\\n' \"$!\"; wait",
         ])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .unwrap();
-    let pid: i32 = String::from_utf8_lossy(&child.stdout)
-        .trim()
-        .parse()
-        .unwrap();
+    let stdout_pipe = child.stdout.take().unwrap();
+    let mut stdout = BufReader::new(stdout_pipe);
+    let mut pid_line = String::new();
+    stdout.read_line(&mut pid_line).unwrap();
+    let pid: i32 = pid_line.trim().parse().unwrap();
 
     fs::write(dir.path().join("higgs.pid"), pid.to_string()).unwrap();
 
@@ -162,22 +180,20 @@ fn stop_force_kills_term_ignoring_process() {
 
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
-        if nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err() {
+        if child.try_wait().unwrap().is_some() {
             return;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let _ = nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(pid),
-        nix::sys::signal::Signal::SIGKILL,
-    );
+    let _ = child.kill();
+    let _ = child.wait();
     panic!("term-ignoring process was still running after stop --force");
 }
 
 #[test]
 fn exec_fails_on_invalid_config_instead_of_falling_back() {
     let dir = tempfile::tempdir().unwrap();
-    write_config(dir.path(), "[server]\nport = 8123\n");
+    write_config(dir.path(), &format!("[server]\nport = {}\n", unused_port()));
 
     let output = Command::new(higgs_bin())
         .args(["exec", "--", "echo", "hello"])

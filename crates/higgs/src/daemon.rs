@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -241,10 +241,19 @@ fn resolved_addr(config: &HiggsConfig) -> String {
     )
 }
 
+fn connect_with_timeout(addr: &str) -> Result<TcpStream, String> {
+    let socket_addr = addr
+        .to_socket_addrs()
+        .map_err(|e| format!("failed to resolve {addr}: {e}"))?
+        .next()
+        .ok_or_else(|| format!("failed to resolve {addr}: no socket addresses found"))?;
+    TcpStream::connect_timeout(&socket_addr, Duration::from_secs(2))
+        .map_err(|e| format!("higgs is not running on {addr}: {e}"))
+}
+
 fn check_health(config: &HiggsConfig) -> Result<(), String> {
     let addr = resolved_addr(config);
-    let mut stream =
-        TcpStream::connect(&addr).map_err(|e| format!("higgs is not running on {addr}: {e}"))?;
+    let mut stream = connect_with_timeout(&addr)?;
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .map_err(|e| format!("failed to set read timeout for {addr}: {e}"))?;
@@ -275,10 +284,18 @@ fn check_health(config: &HiggsConfig) -> Result<(), String> {
 }
 
 fn health_response_is_ok(response: &str) -> bool {
-    let Some((_, body)) = response.split_once("\r\n\r\n") else {
+    let Some((headers, body)) = response.split_once("\r\n\r\n") else {
         return false;
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+    let body_bytes = if response_is_chunked(headers) {
+        let Some(decoded) = decode_chunked_body(body.as_bytes()) else {
+            return false;
+        };
+        decoded
+    } else {
+        body.as_bytes().to_vec()
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body_bytes) else {
         return false;
     };
     value
@@ -287,9 +304,52 @@ fn health_response_is_ok(response: &str) -> bool {
         .is_some_and(|status| status == "ok")
 }
 
+fn response_is_chunked(headers: &str) -> bool {
+    headers.lines().any(|line| {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        name.trim().eq_ignore_ascii_case("transfer-encoding")
+            && value
+                .split(',')
+                .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+    })
+}
+
+fn decode_chunked_body(body: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+
+    loop {
+        let line_end = find_crlf(body, offset)?;
+        let size_line = std::str::from_utf8(body.get(offset..line_end)?).ok()?;
+        let size = usize::from_str_radix(size_line.split(';').next()?.trim(), 16).ok()?;
+        offset = line_end + 2;
+
+        if size == 0 {
+            return Some(out);
+        }
+        let chunk_end = offset.checked_add(size)?;
+        let chunk = body.get(offset..chunk_end)?;
+        out.extend_from_slice(chunk);
+        offset = chunk_end;
+        if body.get(offset..offset + 2)? != b"\r\n" {
+            return None;
+        }
+        offset += 2;
+    }
+}
+
+fn find_crlf(body: &[u8], offset: usize) -> Option<usize> {
+    body.get(offset..)?
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .map(|index| offset + index)
+}
+
 fn ensure_reachable(config: &HiggsConfig) -> Result<String, String> {
     let addr = resolved_addr(config);
-    TcpStream::connect(&addr).map_err(|e| format!("higgs is not running on {addr}: {e}"))?;
+    connect_with_timeout(&addr)?;
     Ok(addr)
 }
 
@@ -870,5 +930,11 @@ mod tests {
     fn health_response_is_ok_rejects_non_ok_status() {
         let response = "HTTP/1.1 200 OK\r\n\r\n{\"status\":\"down\"}";
         assert!(!health_response_is_ok(response));
+    }
+
+    #[test]
+    fn health_response_is_ok_handles_chunked_json_body() {
+        let response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nf\r\n{\"status\":\"ok\"}\r\n0\r\n\r\n";
+        assert!(health_response_is_ok(response));
     }
 }

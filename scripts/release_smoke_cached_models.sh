@@ -23,10 +23,14 @@ if [[ "${HIGGS_SMOKE_INCLUDE_OPTIONAL_MODELS:-0}" == "1" ]]; then
 fi
 
 cleanup_pid=""
+daemon_config_path=""
 cleanup() {
   if [[ -n "${cleanup_pid}" ]] && kill -0 "$cleanup_pid" 2>/dev/null; then
     kill "$cleanup_pid" 2>/dev/null || true
     wait "$cleanup_pid" 2>/dev/null || true
+  fi
+  if [[ -n "${daemon_config_path}" ]]; then
+    "$BIN" --config "$daemon_config_path" stop >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -194,6 +198,7 @@ name = "llama"
 enabled = true
 path = "${TMP_DIR}/daemon.metrics.jsonl"
 EOF
+  daemon_config_path="$config_path"
 
   echo "daemon/dashboard smoke"
   if "$BIN" --config "$config_path" attach >"$TMP_DIR/attach.fail.out" 2>&1; then
@@ -216,6 +221,7 @@ EOF
   wait "$attach_pid" 2>/dev/null || true
 
   "$BIN" --config "$config_path" stop
+  daemon_config_path=""
 }
 
 main() {
@@ -239,7 +245,9 @@ main() {
   single_model_smoke "mlx-community/Qwen2.5-3B-Instruct-4bit" 8102
   single_model_smoke "mlx-community/Qwen3-1.7B-4bit" 8103
   single_model_smoke "mlx-community/Qwen3-Coder-Next-4bit" 8104
-  single_model_smoke "mlx-community/Qwen3.6-35B-A3B-4bit" 8105
+  if [[ "${HIGGS_SMOKE_INCLUDE_OPTIONAL_MODELS:-0}" == "1" ]]; then
+    single_model_smoke "mlx-community/Qwen3.6-35B-A3B-4bit" 8105
+  fi
   multi_model_smoke 8110
   unsupported_batch_smoke
   daemon_smoke 8115

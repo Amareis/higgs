@@ -76,14 +76,17 @@ pub fn config_set(config_path: &Path, key: &str, value: &str) {
         std::process::exit(1);
     });
     if let Err(err) = config::load_config_file(config_path, None) {
-        let bootstrap_error =
-            err.contains("config must define at least one [[models]] entry or [provider.*]");
-        if !bootstrap_error {
+        if !bootstrap_config_allowed(&doc) {
             let _ = restore_original_config(config_path, &original, original_exists);
             eprintln!("refusing to keep invalid config after setting {key}: {err}");
             std::process::exit(1);
         }
     }
+}
+
+fn bootstrap_config_allowed(doc: &toml_edit::DocumentMut) -> bool {
+    let root = doc.as_table();
+    !root.contains_key("models") && !root.contains_key("provider")
 }
 
 fn restore_original_config(
@@ -218,6 +221,24 @@ mod tests {
         let toml = "[server]\nport = 3100\n";
         let err = config_lookup(toml, "server").unwrap_err();
         assert!(err.contains("table, not a value"));
+    }
+
+    #[test]
+    fn bootstrap_config_allowed_only_for_empty_models_and_providers() {
+        let bootstrap: toml_edit::DocumentMut = "[server]\nport = 8000\n".parse().unwrap();
+        assert!(bootstrap_config_allowed(&bootstrap));
+
+        let with_provider: toml_edit::DocumentMut =
+            "[provider.openai]\nurl = \"http://localhost\"\n"
+                .parse()
+                .unwrap();
+        assert!(!bootstrap_config_allowed(&with_provider));
+
+        let with_models: toml_edit::DocumentMut =
+            "[[models]]\npath = \"mlx-community/Llama-3.2-1B-Instruct-4bit\"\n"
+                .parse()
+                .unwrap();
+        assert!(!bootstrap_config_allowed(&with_models));
     }
 
     #[test]

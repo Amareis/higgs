@@ -857,9 +857,19 @@ fn supports_batch_model_type(model_type: &str) -> bool {
 fn batch_support_for_model_path(model_path: &str) -> Result<Option<bool>, String> {
     match crate::model_resolver::resolve(model_path) {
         Ok(resolved) => resolved_model_supports_batch(&resolved).map(Some),
-        Err(_) if crate::model_resolver::is_hf_model_id(model_path) => Ok(None),
-        Err(_) => Ok(None),
+        Err(err) if batch_support_check_can_be_deferred(model_path, &err) => Ok(None),
+        Err(err) => Err(err),
     }
+}
+
+fn batch_support_check_can_be_deferred(model_path: &str, err: &str) -> bool {
+    crate::model_resolver::is_hf_model_id(model_path)
+        && (err
+            == format!(
+                "model '{model_path}' is not an existing directory and was not found in the HuggingFace cache"
+            )
+            || (err.starts_with(&format!("could not read HF cache ref for '{model_path}':"))
+                && err.contains("No such file or directory")))
 }
 
 pub fn resolved_model_supports_batch(model_dir: &Path) -> Result<bool, String> {

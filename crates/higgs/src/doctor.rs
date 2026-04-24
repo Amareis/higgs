@@ -94,16 +94,26 @@ fn check_models(config: &HiggsConfig, result: &mut DoctorResult) {
         }
         match model_resolver::resolve(&model.path) {
             Ok(resolved) => {
-                if model.batch
-                    && !crate::config::resolved_model_supports_batch(&resolved).unwrap_or(false)
-                {
-                    fail(
-                        &format!(
-                            "model {label} enables unsupported batch=true; only transformer models (llama, mistral, qwen2, qwen3) support true batched decode"
-                        ),
-                        result,
-                    );
-                    continue;
+                if model.batch {
+                    match crate::config::resolved_model_supports_batch(&resolved) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            fail(
+                                &format!(
+                                    "model {label} enables unsupported batch=true; only transformer models (llama, mistral, qwen2, qwen3) support true batched decode"
+                                ),
+                                result,
+                            );
+                            continue;
+                        }
+                        Err(err) => {
+                            fail(
+                                &format!("model {label} batch validation failed: {err}"),
+                                result,
+                            );
+                            continue;
+                        }
+                    }
                 }
                 let requested_profile = model.requested_mlx_profile(&config.local);
                 let profile_msg = if model.batch {
