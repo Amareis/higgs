@@ -1,5 +1,8 @@
 use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
+
+use crate::config;
 
 fn format_toml_value(value: &toml_edit::Value) -> String {
     value.as_str().map_or_else(
@@ -36,8 +39,9 @@ pub fn config_set(config_path: &Path, key: &str, value: &str) {
         std::process::exit(1);
     }
 
-    let content = fs::read_to_string(config_path).unwrap_or_default();
-    let mut doc: toml_edit::DocumentMut = content.parse().unwrap_or_else(|e| {
+    let original_exists = config_path.exists();
+    let original = fs::read_to_string(config_path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = original.parse().unwrap_or_else(|e| {
         eprintln!("failed to parse {}: {e}", config_path.display());
         std::process::exit(1);
     });
@@ -60,16 +64,45 @@ pub fn config_set(config_path: &Path, key: &str, value: &str) {
     }
     current[leaf] = parse_toml_value(value);
 
+    let rendered = doc.to_string();
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).unwrap_or_else(|e| {
             eprintln!("failed to create {}: {e}", parent.display());
             std::process::exit(1);
         });
     }
-    fs::write(config_path, doc.to_string()).unwrap_or_else(|e| {
+    fs::write(config_path, &rendered).unwrap_or_else(|e| {
         eprintln!("failed to write {}: {e}", config_path.display());
         std::process::exit(1);
     });
+    if let Err(err) = config::load_config_file(config_path, None) {
+        if !bootstrap_config_allowed(&doc) {
+            let _ = restore_original_config(config_path, &original, original_exists);
+            eprintln!("refusing to keep invalid config after setting {key}: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn bootstrap_config_allowed(doc: &toml_edit::DocumentMut) -> bool {
+    let root = doc.as_table();
+    !root.contains_key("models") && !root.contains_key("provider")
+}
+
+fn restore_original_config(
+    config_path: &Path,
+    original: &str,
+    original_exists: bool,
+) -> std::io::Result<()> {
+    if original_exists {
+        fs::write(config_path, original)
+    } else {
+        match fs::remove_file(config_path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
 }
 
 pub fn config_lookup(content: &str, key: &str) -> Result<String, String> {
@@ -188,5 +221,45 @@ mod tests {
         let toml = "[server]\nport = 3100\n";
         let err = config_lookup(toml, "server").unwrap_err();
         assert!(err.contains("table, not a value"));
+    }
+
+    #[test]
+    fn bootstrap_config_allowed_only_for_empty_models_and_providers() {
+        let bootstrap: toml_edit::DocumentMut = "[server]\nport = 8000\n".parse().unwrap();
+        assert!(bootstrap_config_allowed(&bootstrap));
+
+        let with_provider: toml_edit::DocumentMut =
+            "[provider.openai]\nurl = \"http://localhost\"\n"
+                .parse()
+                .unwrap();
+        assert!(!bootstrap_config_allowed(&with_provider));
+
+        let with_models: toml_edit::DocumentMut =
+            "[[models]]\npath = \"mlx-community/Llama-3.2-1B-Instruct-4bit\"\n"
+                .parse()
+                .unwrap();
+        assert!(!bootstrap_config_allowed(&with_models));
+    }
+
+    #[test]
+    fn restore_original_config_rewrites_existing_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "invalid = [\n").unwrap();
+
+        restore_original_config(&path, "original = true\n", true).unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original = true\n");
+    }
+
+    #[test]
+    fn restore_original_config_removes_new_file_when_original_missing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "invalid = [\n").unwrap();
+
+        restore_original_config(&path, "", false).unwrap();
+
+        assert!(!path.exists());
     }
 }

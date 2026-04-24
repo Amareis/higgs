@@ -94,12 +94,30 @@ fn check_models(config: &HiggsConfig, result: &mut DoctorResult) {
         }
         match model_resolver::resolve(&model.path) {
             Ok(resolved) => {
+                if model.batch {
+                    match crate::config::resolved_model_supports_batch(&resolved) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            fail(
+                                &format!(
+                                    "model {label} enables unsupported batch=true; only transformer models (llama, mistral, qwen2, qwen3) support true batched decode"
+                                ),
+                                result,
+                            );
+                            continue;
+                        }
+                        Err(err) => {
+                            fail(
+                                &format!("model {label} batch validation failed: {err}"),
+                                result,
+                            );
+                            continue;
+                        }
+                    }
+                }
                 let requested_profile = model.requested_mlx_profile(&config.local);
                 let profile_msg = if model.batch {
-                    format!(
-                        "batch=true; requested mlx_profile={} (simple-engine tuning only)",
-                        requested_profile.as_str()
-                    )
+                    "batch=true; batched decode supported".to_owned()
                 } else {
                     let effective_profile =
                         resolve_effective_mlx_profile(&resolved, requested_profile);

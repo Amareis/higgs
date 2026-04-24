@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use figment::{
     Figment,
     providers::{Env, Format, Serialized, Toml},
 };
-use higgs_engine::mlx_tuning::RequestedMlxProfile;
+use higgs_engine::{mlx_tuning::RequestedMlxProfile, model_loader};
 use higgs_models::turboquant::{KvCacheConfig, KvCacheMode};
 use serde::{Deserialize, Serialize};
 
@@ -48,11 +48,11 @@ pub struct Cli {
 pub enum Commands {
     /// Start the server in the foreground.
     Serve(ServeArgs),
-    /// Start the server as a background daemon.
-    Start(ServeArgs),
+    /// Start the server as a background daemon from config or profile.
+    Start(StartArgs),
     /// Stop a running daemon.
-    Stop,
-    /// Attach TUI to a running daemon.
+    Stop(StopArgs),
+    /// Open the daemon metrics dashboard.
     Attach,
     /// Create a default config file at ~/.config/higgs/config.toml.
     Init,
@@ -81,6 +81,86 @@ pub enum ConfigAction {
     Set { key: String, value: String },
     /// Print the resolved config file path.
     Path,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct StartArgs {
+    /// Legacy simple-mode model flag. Use `higgs serve --model ...` instead.
+    #[arg(long = "model", action = clap::ArgAction::Append, hide = true)]
+    pub models: Vec<String>,
+    /// Legacy serve flag. Use `higgs serve --host ...` instead.
+    #[arg(long, hide = true)]
+    pub host: Option<String>,
+    /// Legacy serve flag. Use `higgs serve --port ...` instead.
+    #[arg(long, hide = true)]
+    pub port: Option<u16>,
+    /// Legacy serve flag. Use `higgs serve --max-tokens ...` instead.
+    #[arg(long, hide = true)]
+    pub max_tokens: Option<u32>,
+    /// Legacy serve flag. Use `higgs serve --api-key ...` instead.
+    #[arg(long, hide = true)]
+    pub api_key: Option<String>,
+    /// Legacy serve flag. Use `higgs serve --rate-limit ...` instead.
+    #[arg(long, hide = true)]
+    pub rate_limit: Option<u32>,
+    /// Legacy serve flag. Use `higgs serve --timeout ...` instead.
+    #[arg(long, hide = true)]
+    pub timeout: Option<f64>,
+    /// Legacy serve flag. Use `higgs serve --mlx-profile ...` instead.
+    #[arg(long, hide = true)]
+    pub mlx_profile: Option<MlxProfile>,
+    /// Legacy serve flag. Use `higgs serve --batch` instead.
+    #[arg(long, hide = true)]
+    pub batch: bool,
+    /// Legacy serve flag. Use `higgs serve --kv-cache ...` instead.
+    #[arg(long, hide = true)]
+    pub kv_cache: Option<String>,
+    /// Legacy serve flag. Use `higgs serve --kv-bits ...` instead.
+    #[arg(long, hide = true)]
+    pub kv_bits: Option<u8>,
+    /// Legacy serve flag. Use `higgs serve --kv-key-bits ...` instead.
+    #[arg(long, hide = true)]
+    pub kv_key_bits: Option<u8>,
+    /// Legacy serve flag. Use `higgs serve --kv-value-bits ...` instead.
+    #[arg(long, hide = true)]
+    pub kv_value_bits: Option<u8>,
+    /// Legacy serve flag. Use `higgs serve --kv-no-norm-correction` instead.
+    #[arg(long, hide = true)]
+    pub kv_no_norm_correction: bool,
+    /// Legacy serve flag. Use `higgs serve --kv-adaptive-dense-layers ...` instead.
+    #[arg(long, hide = true)]
+    pub kv_adaptive_dense_layers: Option<u8>,
+    /// Legacy serve flag. Use `higgs serve --kv-seed ...` instead.
+    #[arg(long, hide = true)]
+    pub kv_seed: Option<u64>,
+}
+
+impl StartArgs {
+    pub const fn uses_serve_flags(&self) -> bool {
+        !self.models.is_empty()
+            || self.host.is_some()
+            || self.port.is_some()
+            || self.max_tokens.is_some()
+            || self.api_key.is_some()
+            || self.rate_limit.is_some()
+            || self.timeout.is_some()
+            || self.mlx_profile.is_some()
+            || self.batch
+            || self.kv_cache.is_some()
+            || self.kv_bits.is_some()
+            || self.kv_key_bits.is_some()
+            || self.kv_value_bits.is_some()
+            || self.kv_no_norm_correction
+            || self.kv_adaptive_dense_layers.is_some()
+            || self.kv_seed.is_some()
+    }
+}
+
+#[derive(Args, Debug, Default)]
+pub struct StopArgs {
+    /// Send `SIGKILL` if the daemon does not exit after a graceful timeout.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Parser, Debug, Default)]
@@ -276,6 +356,9 @@ pub struct LocalConfig {
     /// Default MLX tuning profile for local simple-engine models.
     #[serde(default)]
     pub mlx_profile: MlxProfile,
+    /// Raise MLX's wired memory limit to the device-recommended maximum.
+    #[serde(default)]
+    pub raise_wired_limit: bool,
     /// Internal requested profile after resolving precedence (`model` > `--mlx-profile` > `HIGGS_MLX_PROFILE` > local default).
     #[serde(skip, default)]
     pub requested_mlx_profile: RequestedMlxProfile,
@@ -285,6 +368,7 @@ impl Default for LocalConfig {
     fn default() -> Self {
         Self {
             mlx_profile: MlxProfile::Auto,
+            raise_wired_limit: false,
             requested_mlx_profile: RequestedMlxProfile::Auto,
         }
     }
@@ -717,6 +801,15 @@ fn validate_config(config: &HiggsConfig, simple_mode: bool) -> Result<(), String
                 model.path
             ));
         }
+        if model.batch
+            && let Some(supported) = batch_support_for_model_path(&model.path)?
+            && !supported
+        {
+            return Err(format!(
+                "batch=true is only supported for transformer models (llama, mistral, qwen2, qwen3); {} is not supported",
+                model.path
+            ));
+        }
     }
 
     let mut seen_paths = std::collections::HashSet::new();
@@ -755,6 +848,34 @@ fn validate_config(config: &HiggsConfig, simple_mode: bool) -> Result<(), String
     }
 
     Ok(())
+}
+
+fn supports_batch_model_type(model_type: &str) -> bool {
+    matches!(model_type, "qwen2" | "qwen3" | "llama" | "mistral")
+}
+
+fn batch_support_for_model_path(model_path: &str) -> Result<Option<bool>, String> {
+    match crate::model_resolver::resolve(model_path) {
+        Ok(resolved) => resolved_model_supports_batch(&resolved).map(Some),
+        Err(err) if batch_support_check_can_be_deferred(model_path, &err) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+fn batch_support_check_can_be_deferred(model_path: &str, err: &str) -> bool {
+    crate::model_resolver::is_hf_model_id(model_path)
+        && (err
+            == format!(
+                "model '{model_path}' is not an existing directory and was not found in the HuggingFace cache"
+            )
+            || (err.starts_with(&format!("could not read HF cache ref for '{model_path}':"))
+                && err.contains("No such file or directory")))
+}
+
+pub fn resolved_model_supports_batch(model_dir: &Path) -> Result<bool, String> {
+    let inspected = model_loader::ModelConfig::from_dir(model_dir)
+        .map_err(|e| format!("failed to inspect {}: {e}", model_dir.display()))?;
+    Ok(supports_batch_model_type(&inspected.model_type))
 }
 
 /// If `auto_router` is enabled, ensure its model is present in `config.models`

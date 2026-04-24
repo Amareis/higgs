@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     extract::{ConnectInfo, Request},
     http::StatusCode,
     middleware::{self, Next},
@@ -54,10 +55,12 @@ pub fn build_router(
     timeout_secs: f64,
     api_key: Option<String>,
     rate_limit: u32,
+    max_body_size: usize,
 ) -> Router {
     let timeout_duration = Duration::from_secs_f64(timeout_secs);
 
     let mut api_routes = Router::new()
+        .route("/metrics", get(routes::metrics::metrics))
         .route("/v1/models", get(routes::models::list_models))
         .route("/v1/chat/completions", post(routes::chat::chat_completions))
         .route("/v1/completions", post(routes::completions::completions))
@@ -84,6 +87,8 @@ pub fn build_router(
         api_routes = api_routes.layer(auth_layer);
         tracing::info!("API key authentication enabled");
     }
+
+    api_routes = api_routes.layer(DefaultBodyLimit::max(max_body_size));
 
     Router::new()
         .route("/health", get(routes::health::health))

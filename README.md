@@ -19,6 +19,15 @@ Higgs is a single static Rust binary that serves local models, proxies to provid
 - you switch between local and hosted models
 - you want one API surface for apps, agents, and terminal tools
 
+## Breaking-Change Highlights
+
+- `higgs serve` remains the ad hoc foreground entrypoint for `--model`, `--port`, `--batch`, and related flags.
+- `higgs start` is now config/profile-only. Use `higgs init`, then `higgs start`.
+- `higgs attach` is a daemon metrics dashboard. It now requires a live daemon, a passing `/health` probe, and metrics logging.
+- Exact local model names now beat regex routes.
+- `/metrics` is a real endpoint, and `server.max_body_size` is enforced on API requests.
+- `higgs shellenv` and `higgs exec` now fail fast on bad config or an unreachable server.
+
 ## Quick Links
 
 - [Quick Start](#quick-start)
@@ -104,9 +113,16 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### Monitor usage with daemon mode and dashboard
 
-- Run in the foreground with `higgs serve` or as a background daemon with `higgs start`.
-- Attach the TUI dashboard with `higgs attach` for live routing, latency, throughput, and error visibility.
+- Run in the foreground with `higgs serve` or as a background daemon with config-driven `higgs start`.
+- Open the daemon metrics dashboard with `higgs attach` for routing, latency, throughput, and error visibility.
 - Validate config and model/provider setup with `higgs doctor`.
+
+## Apple Silicon Notes
+
+- Release artifacts bundle `mlx.metallib`.
+- Source builds also require `mlx.metallib` next to the executable. Higgs now restores it automatically from Cargo build output when possible, then fails loudly if it still cannot be found.
+- `[local].raise_wired_limit` defaults to `false`. Enable it only when you explicitly want MLX to raise the process wired-memory limit.
+- `batch=true` is only supported for transformer families with true batched decode support.
 
 ## Performance
 
@@ -181,13 +197,27 @@ Measured on DeepSeek-V2-Lite-4bit with global batch sorting before `gather_qmm`.
 **Core commands**
 
 - `higgs serve`: start in the foreground
-- `higgs start`: start as a background daemon
-- `higgs stop`: stop a running daemon
-- `higgs attach`: attach the TUI dashboard
+- `higgs start`: start a background daemon from config or profile
+- `higgs stop`: stop a running daemon, or use `higgs stop --force`
+- `higgs attach`: open the daemon metrics dashboard
 - `higgs init`: create `~/.config/higgs/config.toml`
 - `higgs doctor`: validate config, model paths, and providers
-- `higgs shellenv`: print `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL`
-- `higgs exec -- <cmd>`: run a tool with those variables set
+- `higgs shellenv`: print `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` after verifying the server is reachable
+- `higgs exec -- <cmd>`: run a tool with those variables set after the same reachability check
+
+## Migration Notes
+
+- Replace old `higgs start --model ...` usage with `higgs serve --model ...`.
+- If you previously treated `higgs attach` as a best-effort log viewer, expect it to fail fast when the daemon is down or metrics logging is disabled.
+- If you relied on regex routes to override a local model with the same exact name, rename the local model or route; local exact matches now win.
+- If you run local source builds, make sure `cargo build` completes before first serve so Higgs can restore `mlx.metallib` from Cargo output when needed.
+
+## Release Validation
+
+- Run `scripts/release_smoke_cached_models.sh` to validate the cached MLX models already present on the machine without downloading anything.
+- Set `HIGGS_SMOKE_INCLUDE_OPTIONAL_MODELS=1` to include optional large/private cached models like `mlx-community/Qwen3.6-35B-A3B-4bit`.
+- The harness covers single-model serve, streaming and non-streaming requests, multi-model startup, routing precedence, daemon start/attach/stop, and the batch-support guardrails.
+- The current smoke matrix exercised these cached models on this machine: `mlx-community/Llama-3.2-1B-Instruct-4bit`, `mlx-community/Qwen2.5-3B-Instruct-4bit`, `mlx-community/Qwen3-1.7B-4bit`, `mlx-community/Qwen3-Coder-Next-4bit`, and `mlx-community/Qwen3.6-35B-A3B-4bit`.
 
 For full configuration reference, routing options, supported model families, and benchmark details, see:
 

@@ -1,3 +1,5 @@
+mod api_contract;
+mod cli_contract;
 mod cli_exec;
 mod error_contract;
 mod proxy_e2e;

@@ -273,7 +273,7 @@ impl App {
             .unwrap_or_default();
 
         let title = if self.attached {
-            format!(" higgs{profile_tag} (attached) ")
+            format!(" higgs{profile_tag} (daemon dashboard) ")
         } else {
             format!(" higgs{profile_tag} ")
         };

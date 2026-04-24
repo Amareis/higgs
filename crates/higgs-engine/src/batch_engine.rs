@@ -89,6 +89,7 @@ impl BatchEngine {
     pub fn load<P: AsRef<Path>>(
         dir: P,
         kv_cache_config: KvCacheConfig,
+        raise_wired_limit: bool,
     ) -> Result<Self, EngineError> {
         if kv_cache_config.is_turboquant() {
             return Err(EngineError::Generation(
@@ -106,7 +107,7 @@ impl BatchEngine {
         let eos_token_ids = crate::simple::extract_eos_tokens(model_dir);
         let hidden_size = model.hidden_size();
 
-        crate::simple::set_wired_limit_to_max();
+        crate::simple::set_wired_limit_to_max(raise_wired_limit);
 
         let (request_tx, request_rx) = tokio::sync::mpsc::channel(REQUEST_QUEUE_CAPACITY);
         let eos_ids = eos_token_ids.clone();

@@ -30,15 +30,18 @@ impl Engine {
         dir: P,
         kv_cache_config: KvCacheConfig,
         tuning: MlxRuntimeTuning,
+        raise_wired_limit: bool,
     ) -> Result<Self, EngineError> {
-        SimpleEngine::load(dir, kv_cache_config, tuning).map(|e| Self::Simple(Box::new(e)))
+        SimpleEngine::load(dir, kv_cache_config, tuning, raise_wired_limit)
+            .map(|e| Self::Simple(Box::new(e)))
     }
 
     pub fn load_batch<P: AsRef<Path>>(
         dir: P,
         kv_cache_config: KvCacheConfig,
+        raise_wired_limit: bool,
     ) -> Result<Self, EngineError> {
-        BatchEngine::load(dir, kv_cache_config).map(|e| Self::Batch(Box::new(e)))
+        BatchEngine::load(dir, kv_cache_config, raise_wired_limit).map(|e| Self::Batch(Box::new(e)))
     }
 
     #[cfg(test)]

@@ -51,6 +51,11 @@ fn parse_enabled_flag(raw: Option<&str>) -> Option<bool> {
     }
 }
 
+fn experimental_paged_kv_enabled() -> bool {
+    parse_enabled_flag(std::env::var("HIGGS_EXPERIMENTAL_PAGED_KV").ok().as_deref())
+        .unwrap_or(false)
+}
+
 fn estimate_paged_kv_blocks(
     target_bytes: usize,
     num_kv_heads: usize,
@@ -97,7 +102,11 @@ pub(crate) fn maybe_clear_mlx_cache(enabled: bool, reason: &str) {
 /// `HIGGS_WIRED_LIMIT_MODE=legacy` to restore the older conservative
 /// `memory_limit/cache_limit` behavior, or `HIGGS_NO_MEM_LIMIT=1` to skip both.
 #[allow(unsafe_code)]
-pub(crate) fn set_wired_limit_to_max() {
+pub(crate) fn set_wired_limit_to_max(enabled: bool) {
+    if !enabled {
+        tracing::info!("MLX wired-limit escalation disabled by config");
+        return;
+    }
     unsafe {
         let mut info = mlx_sys::mlx_device_info_new();
         let mut dev = mlx_sys::mlx_device_new();
@@ -182,7 +191,7 @@ pub struct SimpleEngine {
     model: Mutex<AnyModel>,
     prefix_cache: Mutex<PagedPrefixCache>,
     /// Paged KV cache for session-based generation
-    paged_cache: Mutex<PagedKvCache>,
+    paged_cache: Option<Mutex<PagedKvCache>>,
     /// Session scheduler for continuous batching
     scheduler: Mutex<RoundRobinScheduler>,
     /// Active sessions
@@ -219,6 +228,7 @@ impl SimpleEngine {
         dir: P,
         kv_cache_config: KvCacheConfig,
         tuning: MlxRuntimeTuning,
+        raise_wired_limit: bool,
     ) -> Result<Self, EngineError> {
         let model_dir = dir.as_ref();
         let model_name = derive_model_name(model_dir);
@@ -273,7 +283,7 @@ impl SimpleEngine {
             );
         }
 
-        set_wired_limit_to_max();
+        set_wired_limit_to_max(raise_wired_limit);
 
         // Compute the generation prompt suffix length: tokens added by
         // `add_generation_prompt=true` (e.g., `<|im_start|>assistant\n<think>\n`).
@@ -307,18 +317,34 @@ impl SimpleEngine {
             })
             .unwrap_or(0);
 
-        tracing::info!(
-            model_name = %model_name,
-            eos_tokens = ?eos_token_ids,
-            requested_mlx_profile = tuning.requested_profile().as_str(),
-            effective_mlx_profile = tuning.resolved_profile().as_str(),
-            chunked_prefill_threshold = tuning.chunked_prefill_threshold(),
-            chunked_prefill_chunk_size = tuning.chunked_prefill_chunk_size(),
-            clear_cache_after_prefill = tuning.clear_cache_after_prefill(),
-            mtp_enabled = tuning.enable_mtp(),
-            paged_kv_target_mb = tuning.paged_kv_target_bytes() / (1024 * 1024),
-            "Engine ready"
-        );
+        let experimental_paged_kv = experimental_paged_kv_enabled();
+        if experimental_paged_kv {
+            tracing::info!(
+                model_name = %model_name,
+                eos_tokens = ?eos_token_ids,
+                requested_mlx_profile = tuning.requested_profile().as_str(),
+                effective_mlx_profile = tuning.resolved_profile().as_str(),
+                chunked_prefill_threshold = tuning.chunked_prefill_threshold(),
+                chunked_prefill_chunk_size = tuning.chunked_prefill_chunk_size(),
+                clear_cache_after_prefill = tuning.clear_cache_after_prefill(),
+                mtp_enabled = tuning.enable_mtp(),
+                paged_kv_target_mb = tuning.paged_kv_target_bytes() / (1024 * 1024),
+                "Engine ready"
+            );
+        } else {
+            tracing::info!(
+                model_name = %model_name,
+                eos_tokens = ?eos_token_ids,
+                requested_mlx_profile = tuning.requested_profile().as_str(),
+                effective_mlx_profile = tuning.resolved_profile().as_str(),
+                chunked_prefill_threshold = tuning.chunked_prefill_threshold(),
+                chunked_prefill_chunk_size = tuning.chunked_prefill_chunk_size(),
+                clear_cache_after_prefill = tuning.clear_cache_after_prefill(),
+                mtp_enabled = tuning.enable_mtp(),
+                "Engine ready"
+            );
+            tracing::debug!("Experimental paged KV disabled; session cache allocation skipped");
+        }
 
         let (raw_num_kv_heads, raw_head_dim) = model
             .kv_cache_geometry()
@@ -327,20 +353,25 @@ impl SimpleEngine {
             .map_err(|_| EngineError::Generation("paged cache num_kv_heads overflow".to_owned()))?;
         let head_dim = usize::try_from(raw_head_dim)
             .map_err(|_| EngineError::Generation("paged cache head_dim overflow".to_owned()))?;
-        let num_blocks = estimate_paged_kv_blocks(
-            tuning.paged_kv_target_bytes(),
-            num_kv_heads,
-            head_dim,
-            DEFAULT_PAGED_KV_BLOCK_SIZE,
-        );
-
-        let paged_cache = PagedKvCache::new(
-            num_blocks,
-            DEFAULT_PAGED_KV_BLOCK_SIZE,
-            num_kv_heads,
-            head_dim,
-        )
-        .map_err(|e| EngineError::Generation(format!("paged cache init: {e}")))?;
+        let paged_cache = if experimental_paged_kv {
+            let num_blocks = estimate_paged_kv_blocks(
+                tuning.paged_kv_target_bytes(),
+                num_kv_heads,
+                head_dim,
+                DEFAULT_PAGED_KV_BLOCK_SIZE,
+            );
+            Some(
+                PagedKvCache::new(
+                    num_blocks,
+                    DEFAULT_PAGED_KV_BLOCK_SIZE,
+                    num_kv_heads,
+                    head_dim,
+                )
+                .map_err(|e| EngineError::Generation(format!("paged cache init: {e}")))?,
+            )
+        } else {
+            None
+        };
 
         Ok(Self {
             model: Mutex::new(model),
@@ -348,7 +379,7 @@ impl SimpleEngine {
                 DEFAULT_PREFIX_CACHE_SIZE,
                 DEFAULT_BLOCK_SIZE,
             )),
-            paged_cache: Mutex::new(paged_cache),
+            paged_cache: paged_cache.map(Mutex::new),
             scheduler: Mutex::new(RoundRobinScheduler::new()),
             sessions: Mutex::new(std::collections::HashMap::new()),
             tokenizer,
@@ -762,13 +793,14 @@ impl SimpleEngine {
     pub fn remove_session(&self, session_id: u64) -> Result<(), EngineError> {
         let mut scheduler = lock_or_recover(&self.scheduler);
         let mut sessions = lock_or_recover(&self.sessions);
-        let mut paged_cache = lock_or_recover(&self.paged_cache);
-
         sessions.remove(&session_id);
         scheduler.remove(session_id);
-        paged_cache
-            .remove_session(session_id)
-            .map_err(|e| EngineError::Generation(format!("Failed to remove session: {e}")))?;
+        if let Some(paged_cache_mutex) = &self.paged_cache {
+            let mut paged_cache = lock_or_recover(paged_cache_mutex);
+            paged_cache
+                .remove_session(session_id)
+                .map_err(|e| EngineError::Generation(format!("Failed to remove session: {e}")))?;
+        }
 
         Ok(())
     }

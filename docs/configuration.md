@@ -39,6 +39,8 @@ This document collects the full CLI, environment, and config-file reference for 
 - `HIGGS_CHUNKED_PREFILL_CHUNK_SIZE` controls chunk size during chunked prefill.
 - `HIGGS_MTP=0|1` overrides the tuning profile's speculative decode choice when conditions allow.
 - `HIGGS_CLEAR_CACHE_AFTER_PREFILL` overrides the selected MLX profile behavior for cache clearing.
+- `HIGGS_TURBOQUANT_MIN_TOKENS` overrides the TurboQuant activation threshold. The default is `2048`.
+- `HIGGS_EXPERIMENTAL_PAGED_KV=1` enables the experimental paged-KV path.
 - Qwen thinking budget is currently fixed at `256` tokens and is not currently configurable.
 
 ## Gateway Mode
@@ -51,12 +53,14 @@ host = "0.0.0.0"
 port = 8000
 # max_tokens = 32768
 # timeout = 300.0
+# max_body_size = 10485760
 # api_key = "sk-..."
 # rate_limit = 0
 
 # --- Local defaults ---
 [local]
 mlx_profile = "auto"
+raise_wired_limit = false
 
 # --- Local models ---
 [[models]]
@@ -156,8 +160,8 @@ Order of precedence:
 Higgs resolves requests in this order:
 
 1. Auto-router when `model == "auto"` or force mode is enabled
-2. Regex pattern routing, first match wins
-3. Direct local engine lookup by model name
+2. Direct local engine lookup by model name
+3. Regex pattern routing, first match wins
 4. Default route fallback
 
 That means Higgs supports:
@@ -167,6 +171,13 @@ That means Higgs supports:
 - model alias rewriting before forwarding
 - auto-routing with a local classifier model
 - a default target when nothing else matches
+
+## Local Model Notes
+
+- `batch=true` is only supported for transformer families with true batched decode support: `llama`, `mistral`, `qwen2`, and `qwen3`.
+- `higgs doctor` and server startup now reject unsupported `batch=true` combinations instead of silently degrading.
+- `[local].raise_wired_limit` defaults to `false`. Turn it on only when you explicitly want MLX to raise the process wired-memory limit.
+- Source builds on macOS require `mlx.metallib`. Higgs restores it from Cargo build output when possible and fails startup if it still cannot be resolved.
 
 ## Shell Integration
 
@@ -184,15 +195,16 @@ higgs exec -- aider --model openai/gpt-4o
 ```
 
 `higgs exec` verifies that the server is reachable, sets `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL`, then execs the command.
+`higgs shellenv` uses the same strict config loading and reachability checks.
 
 ## CLI Overview
 
 | Command | Description |
 |---|---|
 | `higgs serve` | Start the server in the foreground |
-| `higgs start` | Start as a background daemon |
-| `higgs stop` | Stop a running daemon |
-| `higgs attach` | Attach TUI dashboard to a running daemon |
+| `higgs start` | Start a background daemon from config or profile |
+| `higgs stop` | Stop a running daemon (`--force` escalates to `SIGKILL`) |
+| `higgs attach` | Open the daemon metrics dashboard |
 | `higgs init` | Create the default config file |
 | `higgs shellenv` | Print `export` lines for `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` |
 | `higgs exec -- <cmd>` | Set env vars and exec a command |
@@ -208,3 +220,9 @@ higgs exec -- aider --model openai/gpt-4o
 | `--config <FILE>` | Path to config file, conflicts with `--profile` |
 | `--profile <NAME>` | Named profile, resolves to `config.<NAME>.toml`, conflicts with `--config` |
 | `--verbose` | Enable debug logging |
+
+## Migration Notes
+
+- `higgs start` no longer accepts serve-style flags like `--model`, `--port`, or `--batch`.
+- `higgs attach` now fails fast unless the daemon is alive, `/health` passes, and metrics logging is enabled.
+- `/metrics` is available and `server.max_body_size` is enforced on API routes.

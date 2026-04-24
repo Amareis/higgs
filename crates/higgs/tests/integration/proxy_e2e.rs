@@ -90,7 +90,7 @@ fn openai_chat_request_body() -> serde_json::Value {
 }
 
 fn build_app(state: Arc<AppState>) -> axum::Router {
-    higgs::build_router(state, 300.0, None, 0)
+    higgs::build_router(state, 300.0, None, 0, 10 * 1024 * 1024)
 }
 
 fn post_json(uri: &str, body: &serde_json::Value) -> Request<Body> {
