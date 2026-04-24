@@ -711,7 +711,10 @@ fn prefill_request(
 
         // Cache the post-prefill state
         prefix_cache.store(&req.prompt_tokens, cache.clone());
-        crate::simple::maybe_clear_mlx_cache("batch_post_prefill");
+        crate::simple::maybe_clear_mlx_cache(
+            crate::simple::should_clear_mlx_cache_after_prefill(),
+            "batch_post_prefill",
+        );
 
         let first_token_id: u32 = current_token.item();
         let first_token_logprob = first_logprob_data

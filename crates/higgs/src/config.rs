@@ -234,37 +234,53 @@ const fn default_max_body_size() -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MlxProfile {
+    /// Use model-aware defaults (`auto` is `balanced` for small/medium, `throughput` for large/huge).
     #[default]
     Auto,
+    /// Alias for legacy env `ttft`; bias for lower TTFT and decoding startup.
     Latency,
+    /// Balanced tuning target for mixed latency/throughput behavior.
     Balanced,
+    /// Throughput-first tuning target.
     Throughput,
+    /// Preserve baseline/legacy behavior; available for CLI and config parity with env aliases.
+    Baseline,
 }
 
 impl MlxProfile {
+    /// Canonical profile string used for rendering and logs.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
             Self::Latency => "latency",
             Self::Balanced => "balanced",
             Self::Throughput => "throughput",
+            Self::Baseline => "baseline",
         }
     }
 
+    /// Convert CLI/TOML profile into the internal requested profile.
     pub const fn to_requested(self) -> RequestedMlxProfile {
         match self {
             Self::Auto => RequestedMlxProfile::Auto,
             Self::Latency => RequestedMlxProfile::Latency,
             Self::Balanced => RequestedMlxProfile::Balanced,
             Self::Throughput => RequestedMlxProfile::Throughput,
+            Self::Baseline => RequestedMlxProfile::Baseline,
         }
     }
 }
 
+/// Local config defaults applied before per-model overrides and env/CLI overlays.
+///
+/// `mlx_profile` is user-facing; `requested_mlx_profile` stores the resolved request
+/// after env/CLI fallback and is internal-only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalConfig {
+    /// Default MLX tuning profile for local simple-engine models.
     #[serde(default)]
     pub mlx_profile: MlxProfile,
+    /// Internal requested profile after resolving precedence (`model` > `--mlx-profile` > `HIGGS_MLX_PROFILE` > local default).
     #[serde(skip, default)]
     pub requested_mlx_profile: RequestedMlxProfile,
 }
@@ -891,16 +907,12 @@ pub type ServerConfig = ServerSection;
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[allow(unsafe_code)]
     fn with_env_var<R>(key: &str, desired_value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = crate::test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::env::var(key).ok();
         match desired_value {
             Some(new_value) => unsafe { std::env::set_var(key, new_value) },
@@ -1524,7 +1536,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_file_rejects_invalid_local_mlx_profile() {
+    fn test_config_file_allows_baseline_local_profile() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(
@@ -1539,7 +1551,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(load_config_file(&path, None).is_err());
+        let config = load_config_file(&path, None).unwrap();
+        assert_eq!(config.local.mlx_profile, MlxProfile::Baseline);
+        assert_eq!(
+            config.local.requested_mlx_profile,
+            RequestedMlxProfile::Baseline
+        );
     }
 
     #[test]

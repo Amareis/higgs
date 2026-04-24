@@ -24,17 +24,34 @@ fn parse_enabled_flag(raw: Option<&str>) -> Option<bool> {
     }
 }
 
+/// User-requested MLX profile before auto-resolution.
+///
+/// `RequestedMlxProfile` is used by CLI/config/env precedence and is resolved to
+/// a concrete `ResolvedMlxProfile` before runtime settings are built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RequestedMlxProfile {
+    /// Use conservative baseline runtime settings.
+    ///
+    /// This value is only exposed via env aliases (`baseline`, `default`, `off`).
     Baseline,
+    /// Resolve per model via size-class heuristics.
     #[default]
     Auto,
+    /// Tune for lower time-to-first-token at potential throughput cost.
     Latency,
+    /// Favor a mixed latency/throughput balance.
     Balanced,
+    /// Tune for sustained throughput.
     Throughput,
 }
 
 impl RequestedMlxProfile {
+    /// Parse `HIGGS_MLX_PROFILE`, including legacy aliases.
+    ///
+    /// Supported values:
+    /// - canonical: `auto`, `latency`, `balanced`, `throughput`
+    /// - aliases: `baseline` (same as `default`/`off`), `auto` (`mlx`)
+    /// - legacy benchmark aliases: `ttft`, `tps`
     pub fn from_env_raw(raw: Option<&str>) -> Result<Option<Self>, String> {
         match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
             None => Ok(None),
@@ -44,11 +61,12 @@ impl RequestedMlxProfile {
             Some("balanced") => Ok(Some(Self::Balanced)),
             Some("throughput" | "tps") => Ok(Some(Self::Throughput)),
             Some(other) => Err(format!(
-                "invalid HIGGS_MLX_PROFILE '{other}'; expected auto, latency, balanced, throughput, or legacy aliases baseline/ttft/tps"
+                "invalid HIGGS_MLX_PROFILE '{other}'; expected auto, latency, balanced, throughput, or legacy aliases baseline/default/off, ttft, tps, mlx"
             )),
         }
     }
 
+    /// Canonical profile token used for diagnostics and user-facing logs.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Baseline => "baseline",
@@ -60,11 +78,16 @@ impl RequestedMlxProfile {
     }
 }
 
+/// MLX profile after resolving `auto` against model metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedMlxProfile {
+    /// Conservative baseline runtime settings.
     Baseline,
+    /// Latency-biased runtime settings.
     Latency,
+    /// Balanced runtime settings.
     Balanced,
+    /// Throughput-biased runtime settings.
     Throughput,
 }
 
@@ -158,6 +181,11 @@ impl ModelMetadata {
 }
 
 #[derive(Debug, Clone)]
+/// Tunable MLX runtime settings derived from a requested profile and model metadata.
+///
+/// These settings are consumed only by the local simple-engine path and are resolved
+/// before model load. Advanced `HIGGS_*` env overrides may further mutate these
+/// settings in `from_model_dir`.
 pub struct MlxRuntimeTuning {
     requested_profile: RequestedMlxProfile,
     resolved_profile: ResolvedMlxProfile,
@@ -169,6 +197,8 @@ pub struct MlxRuntimeTuning {
 }
 
 impl MlxRuntimeTuning {
+    /// Resolve runtime tuning settings from model metadata.
+    /// `requested_profile` drives both explicit profile selection and auto-resolution.
     pub fn from_model_dir(model_dir: &Path, requested_profile: RequestedMlxProfile) -> Self {
         let metadata = ModelMetadata::from_model_dir(model_dir);
         let resolved_profile = resolve_profile_from_metadata(requested_profile, &metadata);
@@ -254,14 +284,17 @@ impl MlxRuntimeTuning {
         }
     }
 
+    /// Requested profile before auto-resolution or env/default mutation.
     pub const fn requested_profile(&self) -> RequestedMlxProfile {
         self.requested_profile
     }
 
+    /// Effective profile after resolution.
     pub const fn resolved_profile(&self) -> ResolvedMlxProfile {
         self.resolved_profile
     }
 
+    /// Chunked prefill threshold used by `simple` generation.
     pub const fn chunked_prefill_threshold(&self) -> i32 {
         self.chunked_prefill_threshold
     }
@@ -283,6 +316,7 @@ impl MlxRuntimeTuning {
     }
 }
 
+/// Resolve the full `MlxRuntimeTuning` object for runtime use.
 pub fn resolve_runtime_tuning(
     model_dir: &Path,
     requested_profile: RequestedMlxProfile,
@@ -290,6 +324,7 @@ pub fn resolve_runtime_tuning(
     MlxRuntimeTuning::from_model_dir(model_dir, requested_profile)
 }
 
+/// Resolve only the effective runtime profile (used for diagnostics and reporting).
 pub fn resolve_effective_mlx_profile(
     model_dir: &Path,
     requested_profile: RequestedMlxProfile,
@@ -397,11 +432,37 @@ fn model_weight_bytes(model_dir: &Path) -> Option<u64> {
     let mut stack = vec![model_dir.to_path_buf()];
 
     while let Some(dir) = stack.pop() {
-        let entries = std::fs::read_dir(&dir).ok()?;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                tracing::warn!(
+                    model_dir = %dir.display(),
+                    error = %err,
+                    "Failed to read MLX model directory while estimating weight; continuing"
+                );
+                continue;
+            }
+        };
         for entry_result in entries {
-            let dir_entry = entry_result.ok()?;
+            let dir_entry = match entry_result {
+                Ok(entry) => entry,
+                Err(err) => {
+                    tracing::warn!(error = %err, "Failed to read MLX model directory entry; skipping");
+                    continue;
+                }
+            };
             let path = dir_entry.path();
-            let file_type = dir_entry.file_type().ok()?;
+            let file_type = match dir_entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "Failed to read MLX directory entry type; skipping"
+                    );
+                    continue;
+                }
+            };
             if file_type.is_dir() {
                 stack.push(path);
                 continue;
@@ -411,7 +472,18 @@ fn model_weight_bytes(model_dir: &Path) -> Option<u64> {
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("safetensors"))
             {
-                total = total.saturating_add(dir_entry.metadata().ok()?.len());
+                match dir_entry.metadata() {
+                    Ok(meta) => {
+                        total = total.saturating_add(meta.len());
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %err,
+                            "Failed to stat MLX model file while estimating weight; skipping"
+                        );
+                    }
+                }
             }
         }
     }

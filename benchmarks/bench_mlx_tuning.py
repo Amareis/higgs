@@ -164,7 +164,7 @@ ITERATIONS = [
             "--kv-bits",
             "3",
             "--kv-key-bits",
-            "4",
+            "2",
             "--kv-value-bits",
             "3",
             "--kv-adaptive-dense-layers",

@@ -67,7 +67,17 @@ fn estimate_paged_kv_blocks(
 }
 
 #[allow(unsafe_code)]
-fn maybe_clear_mlx_cache_if(enabled: bool, reason: &str) {
+pub(crate) fn should_clear_mlx_cache_after_prefill() -> bool {
+    parse_enabled_flag(
+        std::env::var("HIGGS_CLEAR_CACHE_AFTER_PREFILL")
+            .ok()
+            .as_deref(),
+    )
+    .unwrap_or(false)
+}
+
+#[allow(unsafe_code)]
+pub(crate) fn maybe_clear_mlx_cache(enabled: bool, reason: &str) {
     if !enabled {
         return;
     }
@@ -78,17 +88,6 @@ fn maybe_clear_mlx_cache_if(enabled: bool, reason: &str) {
     } else {
         tracing::warn!(reason, rc, "Failed to clear MLX allocator cache");
     }
-}
-
-#[allow(unsafe_code)]
-pub(crate) fn maybe_clear_mlx_cache(reason: &str) {
-    let enabled = parse_enabled_flag(
-        std::env::var("HIGGS_CLEAR_CACHE_AFTER_PREFILL")
-            .ok()
-            .as_deref(),
-    )
-    .unwrap_or(false);
-    maybe_clear_mlx_cache_if(enabled, reason);
 }
 
 /// Configure MLX's large-model working set on Apple Silicon.
@@ -610,7 +609,7 @@ impl SimpleEngine {
                 .unwrap_or(prompt_tokens);
             pc.store(cache_key, &prepared.cache);
         }
-        maybe_clear_mlx_cache_if(
+        maybe_clear_mlx_cache(
             self.tuning.clear_cache_after_prefill(),
             "simple_post_prefill",
         );

@@ -41,6 +41,12 @@ use crate::state::SharedState;
 
 type SharedRateLimiter = Arc<RateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>>;
 
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 /// Build the Axum router with all routes and middleware.
 #[allow(clippy::needless_pass_by_value)]
 pub fn build_router(

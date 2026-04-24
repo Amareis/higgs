@@ -533,15 +533,9 @@ pub async fn await_shutdown_signal() {
 #[allow(clippy::panic, clippy::unwrap_used, unsafe_code)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn config_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     fn with_temp_config_dir<F: FnOnce(&std::path::Path)>(f: F) {
-        let _guard = config_env_lock()
+        let _guard = crate::test_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
@@ -556,7 +550,7 @@ mod tests {
 
     #[test]
     fn config_dir_respects_env_override() {
-        let _guard = config_env_lock()
+        let _guard = crate::test_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
@@ -571,7 +565,7 @@ mod tests {
 
     #[test]
     fn config_dir_falls_back_to_home() {
-        let _guard = config_env_lock()
+        let _guard = crate::test_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe {
