@@ -125,10 +125,16 @@ pub enum ExitMode {
     Detach,
 }
 
+const ROUTING_SIDEBAR_WIDTH_DEFAULT: u16 = 50;
+const ROUTING_SIDEBAR_WIDTH_MIN: u16 = 25;
+const ROUTING_SIDEBAR_WIDTH_MAX: u16 = 75;
+const ROUTING_SIDEBAR_WIDTH_STEP_DELTA: i16 = 5;
+
 pub struct App {
     pub metrics: Arc<MetricsStore>,
     pub active_tab: Tab,
     pub scroll_offset: usize,
+    pub routing_sidebar_width_pct: u16,
     pub exit_mode: Option<ExitMode>,
     pub attached: bool,
     pub config: Option<TuiConfig>,
@@ -144,10 +150,30 @@ impl App {
             metrics,
             active_tab: Tab::Overview,
             scroll_offset: 0,
+            routing_sidebar_width_pct: ROUTING_SIDEBAR_WIDTH_DEFAULT,
             exit_mode: None,
             attached,
             config,
         }
+    }
+
+    fn resize_routing_sidebar(&mut self, delta: i16) {
+        self.routing_sidebar_width_pct = self
+            .routing_sidebar_width_pct
+            .saturating_add_signed(delta)
+            .clamp(ROUTING_SIDEBAR_WIDTH_MIN, ROUTING_SIDEBAR_WIDTH_MAX);
+    }
+
+    fn footer_hint(&self) -> String {
+        let mut hint = if self.attached {
+            " q:quit ".to_owned()
+        } else {
+            " q:quit  d:detach ".to_owned()
+        };
+        if self.active_tab == Tab::Routing {
+            hint.push_str(" [:narrow  ]:widen ");
+        }
+        hint
     }
 
     pub fn handle_key(&mut self, key: event::KeyEvent) {
@@ -206,6 +232,12 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => {
                 self.scroll_offset = self.scroll_offset.saturating_sub(1);
             }
+            KeyCode::Char('[') if self.active_tab == Tab::Routing => {
+                self.resize_routing_sidebar(-ROUTING_SIDEBAR_WIDTH_STEP_DELTA);
+            }
+            KeyCode::Char(']') if self.active_tab == Tab::Routing => {
+                self.resize_routing_sidebar(ROUTING_SIDEBAR_WIDTH_STEP_DELTA);
+            }
             KeyCode::Char(_)
             | KeyCode::Backspace
             | KeyCode::Enter
@@ -246,11 +278,7 @@ impl App {
             format!(" higgs{profile_tag} ")
         };
 
-        let hint = if self.attached {
-            " q:quit "
-        } else {
-            " q:quit  d:detach "
-        };
+        let hint = self.footer_hint();
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -301,12 +329,17 @@ impl App {
                 views::errors::draw(frame, content_area, &self.metrics, self.scroll_offset);
             }
             Tab::Routing => {
-                views::routing::draw(frame, content_area, self.config.as_ref());
+                views::routing::draw(
+                    frame,
+                    content_area,
+                    self.config.as_ref(),
+                    self.routing_sidebar_width_pct,
+                );
             }
         }
 
         let footer = Paragraph::new(Line::from(vec![Span::styled(
-            hint,
+            hint.as_str(),
             Style::default().fg(Color::DarkGray),
         )]));
         frame.render_widget(footer, chunks[2]);
@@ -542,6 +575,49 @@ mod tests {
         let mut app = make_attached_app();
         app.handle_key(key(KeyCode::Char('d')));
         assert!(app.exit_mode.is_none());
+    }
+
+    #[test]
+    fn routing_sidebar_resizes_only_on_routing_tab() {
+        let mut app = make_app();
+        app.handle_key(key(KeyCode::Char(']')));
+        assert_eq!(app.routing_sidebar_width_pct, ROUTING_SIDEBAR_WIDTH_DEFAULT);
+
+        app.handle_key(key(KeyCode::Char('5')));
+        app.handle_key(key(KeyCode::Char(']')));
+        assert_eq!(
+            app.routing_sidebar_width_pct,
+            ROUTING_SIDEBAR_WIDTH_DEFAULT
+                + u16::try_from(ROUTING_SIDEBAR_WIDTH_STEP_DELTA).unwrap()
+        );
+
+        app.handle_key(key(KeyCode::Char('[')));
+        assert_eq!(app.routing_sidebar_width_pct, ROUTING_SIDEBAR_WIDTH_DEFAULT);
+    }
+
+    #[test]
+    fn routing_sidebar_resize_clamps() {
+        let mut app = make_app();
+        app.handle_key(key(KeyCode::Char('5')));
+
+        for _ in 0..10 {
+            app.handle_key(key(KeyCode::Char('[')));
+        }
+        assert_eq!(app.routing_sidebar_width_pct, ROUTING_SIDEBAR_WIDTH_MIN);
+
+        for _ in 0..20 {
+            app.handle_key(key(KeyCode::Char(']')));
+        }
+        assert_eq!(app.routing_sidebar_width_pct, ROUTING_SIDEBAR_WIDTH_MAX);
+    }
+
+    #[test]
+    fn routing_footer_shows_resize_hint() {
+        let mut app = make_app();
+        assert!(!app.footer_hint().contains("[:narrow"));
+
+        app.handle_key(key(KeyCode::Char('5')));
+        assert!(app.footer_hint().contains("[:narrow  ]:widen"));
     }
 
     #[test]

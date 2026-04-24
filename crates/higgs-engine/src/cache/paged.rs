@@ -211,13 +211,21 @@ impl PagedKvCache {
     pub fn remove_session(&mut self, session_id: u64) -> Result<(), CacheError> {
         let blocks = self.page_table.remove_session(session_id)?;
 
+        let mut first_free_error = None;
         for block_id in blocks {
-            self.allocator.free(block_id)?;
+            if first_free_error.is_none() {
+                first_free_error = self.allocator.free(block_id).err();
+            } else if let Err(err) = self.allocator.free(block_id) {
+                tracing::warn!(session_id, block_id, error = %err, "Failed to free KV block");
+            }
         }
 
-        self.session_tokens
-            .remove(&session_id)
-            .ok_or(CacheError::SessionNotFound(session_id))?;
+        let removed = self.session_tokens.remove(&session_id);
+
+        if let Some(err) = first_free_error {
+            return Err(err);
+        }
+        removed.ok_or(CacheError::SessionNotFound(session_id))?;
 
         Ok(())
     }
@@ -294,8 +302,20 @@ impl PagedKvCache {
         let new_blocks = self.allocator.alloc_n(additional)?;
 
         let mut all_blocks = current_blocks;
-        all_blocks.extend(new_blocks);
-        self.page_table.assign_blocks(session_id, &all_blocks)?;
+        all_blocks.extend(new_blocks.iter().copied());
+        if let Err(err) = self.page_table.assign_blocks(session_id, &all_blocks) {
+            for block_id in new_blocks {
+                if let Err(free_err) = self.allocator.free(block_id) {
+                    tracing::warn!(
+                        session_id,
+                        block_id,
+                        error = %free_err,
+                        "Failed to free newly allocated KV block after assign failure"
+                    );
+                }
+            }
+            return Err(err);
+        }
 
         self.page_table
             .get_blocks(session_id)

@@ -105,8 +105,12 @@ def compute_ppl_mlx(model_path, ctx_len=2048, stride=512, max_chunks=50):
 
         mx.eval(target_logprobs)  # force eval to free graph
 
-    final_ppl = math.exp(sum(nlls) / n_tokens)
-    print(f"\n  FINAL PPL: {final_ppl:.4f} ({n_tokens} tokens, {chunk_count} chunks)")
+    if n_tokens == 0:
+        print("\n  FINAL PPL: N/A (no chunks scored — text shorter than context?)")
+        final_ppl = float("inf")
+    else:
+        final_ppl = math.exp(sum(nlls) / n_tokens)
+        print(f"\n  FINAL PPL: {final_ppl:.4f} ({n_tokens} tokens, {chunk_count} chunks)")
     print(f"  Peak memory: {mx.get_peak_memory() / 1e9:.1f} GB")
 
     # Free model

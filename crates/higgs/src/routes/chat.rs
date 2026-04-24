@@ -344,27 +344,28 @@ async fn chat_completions_non_streaming(
         .as_ref()
         .map(|lps| logprobs_to_response(lps, &tokenizer));
 
+    let output_text = output.text;
     // Parse reasoning (think tags) from the output.
     // When thinking mode is enabled, the template already opened `<think>` in the prompt,
     // so the generated text starts inside the think block. Prepend `<think>` so the parser
     // can find the matching `</think>` and split reasoning from visible content.
     let parse_input = if thinking_enabled {
-        if output.text.contains("</think>") {
-            format!("<think>{}", output.text)
+        if output_text.contains("</think>") {
+            format!("<think>{output_text}")
         } else {
             // Model was length-stopped mid-thinking — close the tag so the
             // parser can extract reasoning instead of leaking raw `<think>`.
-            format!("<think>{}</think>", output.text)
+            format!("<think>{output_text}</think>")
         }
     } else {
-        output.text
+        output_text.clone()
     };
     let (raw_text, reasoning_content) = if thinking_enabled {
         let reasoning_result = higgs_engine::reasoning_parser::parse_reasoning(&parse_input);
         let raw_text = if reasoning_result.reasoning.is_some() {
             reasoning_result.text
         } else {
-            parse_input
+            output_text
         };
         (raw_text, reasoning_result.reasoning)
     } else {
@@ -441,11 +442,17 @@ fn chat_completions_stream(
     metrics: Option<Arc<MetricsStore>>,
     routing_method: crate::router::RoutingMethod,
 ) -> Result<impl Stream<Item = Result<Event, Infallible>>, ServerError> {
+    let stream_includes_tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
+
     // Tool-calling responses are not supported in streaming mode.
     // Accept requests that include tools (nanobot always sends them) but
     // exclude them from prompt rendering so the model generates plain text.
-    if req.tools.as_ref().is_some_and(|t| !t.is_empty()) {
-        tracing::debug!("Streaming request includes tools; ignoring for prompt rendering");
+    if stream_includes_tools {
+        tracing::warn!(
+            request_model = req.model,
+            tool_count = req.tools.as_ref().map_or(0, Vec::len),
+            "Streaming API does not support tool-calls; tools will be ignored",
+        );
     }
 
     let max_tokens = req.max_tokens.unwrap_or(state.config.server.max_tokens);
@@ -494,6 +501,10 @@ fn chat_completions_stream(
     let constraint = build_constraint(req.response_format.as_ref(), &engine)?;
 
     let request_id = generate_request_id();
+    let include_usage = req
+        .stream_options
+        .as_ref()
+        .is_some_and(|opts| opts.include_usage.unwrap_or(false));
     let created = current_unix_timestamp();
     let model = req.model;
     let prompt_token_count = u32::try_from(prompt_tokens.len()).unwrap_or(0);
@@ -712,22 +723,24 @@ fn chat_completions_stream(
             }
         }
 
-        // Emit final chunk with usage (OpenAI stream_options.include_usage)
-        let usage_chunk = ChatCompletionChunk {
-            id: request_id.clone(),
-            object: "chat.completion.chunk",
-            created,
-            model: model.clone(),
-            choices: vec![],
-            usage: Some(CompletionUsage {
-                prompt_tokens: prompt_token_count,
-                completion_tokens: output_token_count,
-                total_tokens: prompt_token_count + output_token_count,
-            }),
-        };
-        match serde_json::to_string(&usage_chunk) {
-            Ok(json) => yield Ok(Event::default().data(json)),
-            Err(e) => tracing::error!(error = %e, "Failed to serialize usage chunk"),
+        // Emit final chunk with usage only when explicitly requested.
+        if include_usage {
+            let usage_chunk = ChatCompletionChunk {
+                id: request_id.clone(),
+                object: "chat.completion.chunk",
+                created,
+                model: model.clone(),
+                choices: vec![],
+                usage: Some(CompletionUsage {
+                    prompt_tokens: prompt_token_count,
+                    completion_tokens: output_token_count,
+                    total_tokens: prompt_token_count + output_token_count,
+                }),
+            };
+            match serde_json::to_string(&usage_chunk) {
+                Ok(json) => yield Ok(Event::default().data(json)),
+                Err(e) => tracing::error!(error = %e, "Failed to serialize usage chunk"),
+            }
         }
 
         if let Some(ref m) = metrics {

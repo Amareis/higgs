@@ -24,6 +24,8 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub stream: Option<bool>,
     #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
+    #[serde(default)]
     pub stop: Option<StopSequence>,
     #[serde(default)]
     pub tools: Option<Vec<serde_json::Value>>,
@@ -39,6 +41,13 @@ pub struct ChatCompletionRequest {
     /// a non-empty value such as `"low"` to explicitly enable reasoning.
     #[serde(default)]
     pub reasoning: Option<ReasoningConfig>,
+}
+
+/// Optional request-level controls for streaming responses.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StreamOptions {
+    #[serde(default)]
+    pub include_usage: Option<bool>,
 }
 
 /// Optional reasoning controls accepted on chat completion requests.
