@@ -72,11 +72,12 @@ jobs:
           TAG="${{ needs.release-please.outputs.tag_name }}"
           VERSION="${TAG#higgs-v}"
           ARCHIVE_NAME="higgs_${VERSION}_${{ matrix.target }}"
+          METALLIB="$(find target/${{ matrix.target }}/release/build -path '*/out/build/lib/mlx.metallib' -exec stat -f '%m %N' {} \; | sort -nr | head -n 1 | cut -d' ' -f2-)"
 
           mkdir -p dist
           cp target/${{ matrix.target }}/release/higgs dist/
-          test -f target/${{ matrix.target }}/release/mlx.metallib
-          cp target/${{ matrix.target }}/release/mlx.metallib dist/
+          test -n "$METALLIB"
+          cp "$METALLIB" dist/mlx.metallib
           cd dist
           tar -czvf "${ARCHIVE_NAME}.tar.gz" higgs mlx.metallib
           shasum -a 256 "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
@@ -103,15 +104,29 @@ jobs:
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
 
+      - name: Check crates.io publishability
+        id: publishability
+        run: |
+          if grep -Eq '^mlx-(rs|sys)\s*=\s*\{[^}]*git\s*=' Cargo.toml; then
+            echo "publishable=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping crates.io publish: release artifacts depend on unreleased mlx-rs git revisions."
+            exit 0
+          fi
+
+          echo "publishable=true" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust toolchain
+        if: ${{ steps.publishability.outputs.publishable == 'true' }}
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
 
       - name: Cache cargo registry and build
+        if: ${{ steps.publishability.outputs.publishable == 'true' }}
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Publish higgs-models
+        if: ${{ steps.publishability.outputs.publishable == 'true' }}
         run: |
           out=$(cargo publish -p higgs-models --token ${{ secrets.CARGO_REGISTRY_TOKEN }} 2>&1) && echo "$out" || {
             echo "$out"
@@ -119,9 +134,11 @@ jobs:
           }
 
       - name: Wait for crates.io to index higgs-models
+        if: ${{ steps.publishability.outputs.publishable == 'true' }}
         run: sleep 30
 
       - name: Publish higgs-engine
+        if: ${{ steps.publishability.outputs.publishable == 'true' }}
         run: |
           out=$(cargo publish -p higgs-engine --token ${{ secrets.CARGO_REGISTRY_TOKEN }} 2>&1) && echo "$out" || {
             echo "$out"
@@ -129,9 +146,11 @@ jobs:
           }
 
       - name: Wait for crates.io to index higgs-engine
+        if: ${{ steps.publishability.outputs.publishable == 'true' }}
         run: sleep 30
 
       - name: Publish higgs
+        if: ${{ steps.publishability.outputs.publishable == 'true' }}
         run: |
           out=$(cargo publish -p higgs --token ${{ secrets.CARGO_REGISTRY_TOKEN }} 2>&1) && echo "$out" || {
             echo "$out"
