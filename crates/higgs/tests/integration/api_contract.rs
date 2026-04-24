@@ -53,7 +53,7 @@ fn build_test_state(metrics: Option<Arc<MetricsStore>>) -> Arc<AppState> {
 
 #[tokio::test]
 async fn metrics_endpoint_returns_snapshot_json() {
-    let metrics = Arc::new(MetricsStore::new(Duration::from_secs(60)));
+    let metrics = Arc::new(MetricsStore::new(Duration::from_mins(1)));
     metrics.record(RequestRecord {
         id: 1,
         timestamp: Instant::now(),

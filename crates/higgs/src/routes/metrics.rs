@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn response_aggregates_snapshot() {
-        let metrics = MetricsStore::new(Duration::from_secs(60));
+        let metrics = MetricsStore::new(Duration::from_mins(1));
         metrics.record(sample_record("model-a", "higgs", 200));
         metrics.record(sample_record("model-a", "higgs", 500));
         metrics.record(sample_record("model-b", "openai", 200));
