@@ -15,7 +15,7 @@ A model router and inference server for Apple Silicon that optimizes model servi
 brew install panbanda/brews/higgs
 ```
 
-Or build from source (Rust 1.87.0+, Xcode CLI Tools):
+Or build from source (Rust 1.88.0+, Xcode CLI Tools):
 
 ```bash
 cargo build --release
