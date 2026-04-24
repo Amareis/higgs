@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.1.21](https://github.com/panbanda/higgs/compare/higgs-models-v0.1.20...higgs-models-v0.1.21) (2026-04-24)
+
+
+### Features
+
+* add qwen3.5/qwen3.6 turboquant stack ([4f165ee](https://github.com/panbanda/higgs/commit/4f165eeca1166ac1d1b62cbaf523b83d344b9a22))
+* Qwen3.5 model architecture, TurboQuant KV cache, and model-level optimizations ([1514737](https://github.com/panbanda/higgs/commit/1514737d4e1fb108c68b3150e9104aae5b20f400))
+
+
+### Bug Fixes
+
+* address coderabbit issues ([6f10bc6](https://github.com/panbanda/higgs/commit/6f10bc6d733c192d30c5ab3aed76e4a2e2a69818))
+* address review items across models and engine — PR [#74](https://github.com/panbanda/higgs/issues/74) ([8863e2d](https://github.com/panbanda/higgs/commit/8863e2d11dacbdada6e560556813c051bf265d8b))
+* cargo fmt + restore higgs crate build on PR [#74](https://github.com/panbanda/higgs/issues/74) ([050af95](https://github.com/panbanda/higgs/commit/050af9590968c129dc8f0a5003d4af47f6591da5))
+* clear lint and review blockers ([9c8b878](https://github.com/panbanda/higgs/commit/9c8b878bb654ba8865f3455c91ba457b83d1161b))
+* **engine,models:** cache config propagation, ndim guards, FSM ordering ([37d2ddd](https://github.com/panbanda/higgs/commit/37d2ddd3c222614373f9ee3c49b43e5e69e35c62))
+* **engine,models:** clippy clean lib targets on PR [#74](https://github.com/panbanda/higgs/issues/74) (51→0 errors) ([ebf3192](https://github.com/panbanda/higgs/commit/ebf319238ed9a79c8efc18bba6b0fbfc6b98f3e3))
+* honor qwen3 next gate quantization ([00958e1](https://github.com/panbanda/higgs/commit/00958e1687201e9ed02875dd606bcfb406ab08ed))
+* make pre-push pass on dust stack ([2695165](https://github.com/panbanda/higgs/commit/26951659aa8ff56d0362a6916827dbe9cf6fae88))
+* **models:** clippy clean for higgs-models on PR [#74](https://github.com/panbanda/higgs/issues/74) (part 2/2) ([1b4470b](https://github.com/panbanda/higgs/commit/1b4470bd7e286c259cf03a63f34fa1a773d9642a))
+* **models:** clippy clean in 5/7 files on PR [#74](https://github.com/panbanda/higgs/issues/74) (part 1/2) ([af57c32](https://github.com/panbanda/higgs/commit/af57c3223e81c0328d8217794358e52ec3aadd35))
+* satisfy clippy on qwen3.6 tests ([ab2920a](https://github.com/panbanda/higgs/commit/ab2920a182c2a76f8a2e54b67479a044d9513024))
+* stabilize dust stack CI ([8e629e3](https://github.com/panbanda/higgs/commit/8e629e35e53bb65b9a6dd718be5d2d50a79e297c))
+* support mlx qwen3.6 smoke ([7046849](https://github.com/panbanda/higgs/commit/704684970b3cf43ad9bc3644e74422e378dacfd4))
+
 ## [0.1.20](https://github.com/panbanda/higgs/compare/higgs-models-v0.1.19...higgs-models-v0.1.20) (2026-02-28)
 
 
