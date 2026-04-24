@@ -11,7 +11,9 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::OnceLock;
 
 use mlx_rs::{Array, Dtype, Stream, argmin_axis, error::Exception, ops};
-use rand::{Rng, SeedableRng};
+#[cfg(test)]
+use rand::Rng;
+use rand::{RngExt, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 const ONE_BIT_CENTROIDS: [f32; 2] = [-0.797_884_6, 0.797_884_6];
@@ -1025,7 +1027,7 @@ pub fn fwht_normalized(x: &mut [f32]) {
 fn random_normal<R: Rng>(rng: &mut R) -> f32 {
     let u1 = rng.random::<f32>().max(1.0e-7);
     let u2 = rng.random::<f32>();
-    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
+    (-2.0_f32 * u1.ln()).sqrt() * (2.0_f32 * std::f32::consts::PI * u2).cos()
 }
 
 #[cfg(test)]
