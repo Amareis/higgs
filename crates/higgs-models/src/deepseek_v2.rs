@@ -216,7 +216,11 @@ fn apply_deepseek_rope(
     offset: i32,
 ) -> Result<Array, Exception> {
     let x_scaled = if (yarn_mscale - 1.0).abs() > f32::EPSILON {
-        x.multiply(mlx_rs::array!(yarn_mscale))?
+        // Match x's dtype to avoid silent fp16->f32 upcast. `mlx_rs::array!`
+        // promotes a f32 scalar literal which would propagate f32 through
+        // the entire attention chain (rope -> SDPA -> o_proj -> residual).
+        let scalar = Array::from_f32(yarn_mscale).as_dtype(x.dtype())?;
+        x.multiply(&scalar)?
     } else {
         x.clone()
     };
@@ -622,7 +626,9 @@ impl DeepSeekV2MlpBlock {
 
         // Scale scores
         let scaled_scores = if (self.scaling_factor - 1.0).abs() > f32::EPSILON {
-            top_scores.multiply(mlx_rs::array!(self.scaling_factor))?
+            // Preserve top_scores dtype; same fp16->f32 promotion bug as apply_deepseek_rope.
+            let scalar = Array::from_f32(self.scaling_factor).as_dtype(top_scores.dtype())?;
+            top_scores.multiply(&scalar)?
         } else {
             top_scores
         };
@@ -1196,5 +1202,23 @@ mod tests {
         args.first_k_dense_replace = 0;
         let model = DeepSeekV2CausalLM::new(args).unwrap();
         assert!(model.args.n_routed_experts.is_none());
+    }
+
+    #[test]
+    fn apply_deepseek_rope_preserves_input_dtype_under_yarn_scaling() {
+        use mlx_rs::Dtype;
+
+        // Shape matches MLA RoPE input: [batch, n_heads, seq, head_dim].
+        let x_fp16 = Array::ones::<f32>(&[1, 1, 4, 8])
+            .unwrap()
+            .as_dtype(Dtype::Float16)
+            .unwrap();
+
+        // yarn_mscale != 1.0 triggers the scalar-multiply branch. Before the
+        // fix, multiplying fp16 by an `array!(f32)` scalar silently upcast the
+        // entire chain to f32, propagating through SDPA -> o_proj -> residual.
+        let result = apply_deepseek_rope(&x_fp16, 8, 10000.0, None, 1.5, 0).unwrap();
+
+        assert_eq!(result.dtype(), Dtype::Float16);
     }
 }
