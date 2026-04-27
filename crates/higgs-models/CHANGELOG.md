@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.1](https://github.com/panbanda/higgs/compare/higgs-models-v1.0.0...higgs-models-v1.0.1) (2026-04-27)
+
+
+### Performance Improvements
+
+* **dtype:** preserve fp16 through scalar multiply in deepseek_v2 + siglip ([5dfbd15](https://github.com/panbanda/higgs/commit/5dfbd159926113e5a53a620933f701d7dd3c6ff2))
+* **dtype:** preserve fp16 through scalar multiply in deepseek_v2 + siglip ([90aec29](https://github.com/panbanda/higgs/commit/90aec296ada971231dff254cad1095eac1c92646))
+
 ## [1.0.0](https://github.com/panbanda/higgs/compare/higgs-models-v0.1.22...higgs-models-v1.0.0) (2026-04-24)
 
 

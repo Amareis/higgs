@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/panbanda/higgs/compare/higgs-v1.0.0...higgs-v1.0.1) (2026-04-27)
+
+
+### Bug Fixes
+
+* clarify metallib recovery hint ([645dbb0](https://github.com/panbanda/higgs/commit/645dbb0201b3a54e3be754a6165ca4bbd951141b))
+
 ## [1.0.0](https://github.com/panbanda/higgs/compare/higgs-v0.1.22...higgs-v1.0.0) (2026-04-24)
 
 

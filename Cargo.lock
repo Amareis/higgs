@@ -1467,7 +1467,7 @@ dependencies = [
 
 [[package]]
 name = "higgs"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-stream",
  "axum",
@@ -1509,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "higgs-engine"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "half",
  "higgs-models",
@@ -1529,7 +1529,7 @@ dependencies = [
 
 [[package]]
 name = "higgs-models"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "image",
  "mlx-rs",
