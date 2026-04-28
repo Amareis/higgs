@@ -1,78 +1,17 @@
-// Microbench for SSE chunk serialization. Compares the baseline
-// `serde_json::to_string(&full_chunk)` path against the pre-serialized prefix
-// path in `crate::sse`.
+//! Microbench for SSE chunk serialization.
+//!
+//! Compares the baseline `serde_json::to_string(&full_chunk)` path against the
+//! production pre-serialized prefix path in `crate::sse::ChatChunkWriter`. By
+//! calling the production writer directly (rather than re-implementing it
+//! locally), the bench numbers stay tied to the code that actually serves
+//! requests. Future changes to `crate::sse` show up here automatically.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, missing_docs)]
 
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use serde::Serialize;
-
-// We can't reach the private `sse` module from a `benches/` target, so we
-// re-implement the writer locally. It is a 1:1 copy of `crate::sse` and is
-// kept in sync by the unit tests in that module which assert byte-equivalence
-// with `serde_json::to_string`.
-
-#[derive(Debug, Clone, Serialize)]
-struct ChunkChoice<'a> {
-    index: u32,
-    delta: Delta<'a>,
-    finish_reason: Option<&'a str>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Delta<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    role: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<&'a str>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Chunk<'a> {
-    id: &'a str,
-    object: &'static str,
-    created: i64,
-    model: &'a str,
-    choices: Vec<ChunkChoice<'a>>,
-}
-
-fn push_json_string(out: &mut String, s: &str) {
-    if let Ok(encoded) = serde_json::to_string(s) {
-        out.push_str(&encoded);
-    }
-}
-
-struct Writer {
-    prefix: String,
-    buf: String,
-}
-
-impl Writer {
-    fn new(id: &str, created: i64, model: &str) -> Self {
-        let mut prefix = String::with_capacity(96 + id.len() + model.len());
-        prefix.push_str(r#"{"id":"#);
-        push_json_string(&mut prefix, id);
-        prefix.push_str(r#","object":"chat.completion.chunk","created":"#);
-        prefix.push_str(&created.to_string());
-        prefix.push_str(r#","model":"#);
-        push_json_string(&mut prefix, model);
-        prefix.push_str(r#","choices":[{"index":0,"delta":"#);
-        Self {
-            prefix,
-            buf: String::with_capacity(256),
-        }
-    }
-
-    fn write_delta(&mut self, delta: &Delta) -> &str {
-        self.buf.clear();
-        self.buf.push_str(&self.prefix);
-        let dj = serde_json::to_string(delta).unwrap();
-        self.buf.push_str(&dj);
-        self.buf.push_str(r#","finish_reason":null}]}"#);
-        &self.buf
-    }
-}
+use higgs::sse::ChatChunkWriter;
+use higgs::types::openai::{ChatCompletionChunk, ChatCompletionChunkChoice, ChatCompletionDelta};
 
 fn bench_chunk_serialize(c: &mut Criterion) {
     let id = "chatcmpl-1234567890abcdef";
@@ -84,19 +23,23 @@ fn bench_chunk_serialize(c: &mut Criterion) {
 
     group.bench_function("baseline_full_serde", |b| {
         b.iter(|| {
-            let chunk = Chunk {
-                id,
+            let chunk = ChatCompletionChunk {
+                id: id.to_owned(),
                 object: "chat.completion.chunk",
                 created,
-                model,
-                choices: vec![ChunkChoice {
+                model: model.to_owned(),
+                choices: vec![ChatCompletionChunkChoice {
                     index: 0,
-                    delta: Delta {
+                    delta: ChatCompletionDelta {
                         role: None,
-                        content: Some(token_text),
+                        content: Some(token_text.to_owned()),
+                        reasoning_content: None,
+                        tool_calls: None,
                     },
                     finish_reason: None,
+                    logprobs: None,
                 }],
+                usage: None,
             };
             let s = serde_json::to_string(black_box(&chunk)).unwrap();
             black_box(s);
@@ -104,13 +47,15 @@ fn bench_chunk_serialize(c: &mut Criterion) {
     });
 
     group.bench_function("prefix_writer", |b| {
-        let mut w = Writer::new(id, created, model);
+        let mut w = ChatChunkWriter::new(id, created, model);
         b.iter(|| {
-            let d = Delta {
+            let d = ChatCompletionDelta {
                 role: None,
-                content: Some(black_box(token_text)),
+                content: Some(black_box(token_text).to_owned()),
+                reasoning_content: None,
+                tool_calls: None,
             };
-            let out = w.write_delta(&d);
+            let out = w.write_delta(&d, None, None).unwrap();
             black_box(out.len());
         });
     });

@@ -21,7 +21,11 @@ use crate::types::openai::{
 };
 
 /// Pre-serialized prefix + reusable buffer for chat-completion SSE chunks.
-pub(crate) struct ChatChunkWriter {
+///
+/// `pub` so the criterion bench in `benches/sse_serialize.rs` can call the
+/// production code path directly (kept `#[doc(hidden)]` at the module level
+/// to avoid expanding the public API surface).
+pub struct ChatChunkWriter {
     /// `{"id":"...","object":"chat.completion.chunk","created":N,"model":"..."`
     /// (no trailing comma; the variable part picks up the comma).
     head: String,
@@ -33,7 +37,7 @@ pub(crate) struct ChatChunkWriter {
 }
 
 impl ChatChunkWriter {
-    pub(crate) fn new(id: &str, created: i64, model: &str) -> Self {
+    pub fn new(id: &str, created: i64, model: &str) -> Self {
         let mut head = String::with_capacity(64 + id.len() + model.len());
         head.push_str(r#"{"id":"#);
         push_json_string(&mut head, id);
@@ -55,7 +59,7 @@ impl ChatChunkWriter {
 
     /// Build a chunk carrying a `delta` and an optional `finish_reason` /
     /// `logprobs`, with `usage = None`.
-    pub(crate) fn write_delta(
+    pub fn write_delta(
         &mut self,
         delta: &ChatCompletionDelta,
         finish_reason: Option<&str>,
