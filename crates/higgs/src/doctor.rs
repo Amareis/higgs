@@ -41,6 +41,7 @@ pub async fn run_doctor(config: &HiggsConfig) -> DoctorResult {
     eprintln!("\x1b[1mhiggs doctor\x1b[0m\n");
 
     check_config_valid(&mut result);
+    check_server_section(config, &mut result);
     check_models(config, &mut result);
     check_duplicate_models(config, &mut result);
     check_providers(config, &mut result).await;
@@ -61,6 +62,86 @@ pub async fn run_doctor(config: &HiggsConfig) -> DoctorResult {
 fn check_config_valid(result: &mut DoctorResult) {
     // If we got this far, the config parsed and validated successfully.
     pass("config file is valid", result);
+}
+
+fn check_server_section(config: &crate::config::HiggsConfig, result: &mut DoctorResult) {
+    let server = &config.server;
+
+    if server.max_tokens == 0 {
+        fail(
+            "server.max_tokens=0 produces empty completions; set a positive value",
+            result,
+        );
+    } else {
+        pass(&format!("server.max_tokens={}", server.max_tokens), result);
+    }
+
+    if !server.timeout.is_finite() || server.timeout <= 0.0 {
+        fail(
+            &format!(
+                "server.timeout={} must be a positive finite number of seconds",
+                server.timeout
+            ),
+            result,
+        );
+    } else if server.timeout > 600.0 {
+        warn(
+            &format!(
+                "server.timeout={}s is unusually high (>10 min); check intent",
+                server.timeout
+            ),
+            result,
+        );
+    } else {
+        pass(&format!("server.timeout={}s", server.timeout), result);
+    }
+
+    if server.max_body_size == 0 {
+        fail("server.max_body_size=0 rejects all request bodies", result);
+    } else if server.max_body_size > 1 << 30 {
+        warn(
+            &format!(
+                "server.max_body_size={} bytes (>1 GiB); check intent",
+                server.max_body_size
+            ),
+            result,
+        );
+    } else {
+        pass(
+            &format!("server.max_body_size={} bytes", server.max_body_size),
+            result,
+        );
+    }
+
+    if server.host.parse::<std::net::IpAddr>().is_ok() || server.host == "localhost" {
+        pass(&format!("server.host=\"{}\"", server.host), result);
+    } else {
+        warn(
+            &format!(
+                "server.host=\"{}\" is not an IP address or \"localhost\"; bind may fail at runtime",
+                server.host
+            ),
+            result,
+        );
+    }
+
+    if server.api_key.is_some() {
+        pass("server.api_key set; API key auth enabled", result);
+    } else {
+        pass(
+            "server.api_key unset; no auth enforced (server is open)",
+            result,
+        );
+    }
+
+    if server.rate_limit == 0 {
+        pass("server.rate_limit=0 (disabled)", result);
+    } else {
+        pass(
+            &format!("server.rate_limit={} req/min/client", server.rate_limit),
+            result,
+        );
+    }
 }
 
 fn model_label(model: &crate::config::ModelConfig) -> String {
@@ -307,7 +388,12 @@ fn check_auto_router(config: &HiggsConfig, result: &mut DoctorResult) {
 }
 
 fn check_port_availability(config: &HiggsConfig, result: &mut DoctorResult) {
-    let addr = format!("{}:{}", config.server.host, config.server.port);
+    let host = &config.server.host;
+    let port = config.server.port;
+    let addr = host.parse::<std::net::IpAddr>().map_or_else(
+        |_| format!("{host}:{port}"),
+        |ip| std::net::SocketAddr::new(ip, port).to_string(),
+    );
     match std::net::TcpListener::bind(&addr) {
         Ok(_) => pass(&format!("port {} available", config.server.port), result),
         Err(err) => warn(
@@ -639,6 +725,127 @@ mod tests {
         assert_eq!(result.warnings, 1);
     }
 
+    // -- Server section validation --
+
+    fn server_with(modify: impl FnOnce(&mut ServerSection)) -> HiggsConfig {
+        let mut server = ServerSection::default();
+        modify(&mut server);
+        HiggsConfig {
+            server,
+            ..HiggsConfig::default()
+        }
+    }
+
+    #[test]
+    fn test_server_default_passes() {
+        let config = HiggsConfig::default();
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert_eq!(result.failures, 0);
+        assert_eq!(result.warnings, 0);
+    }
+
+    #[test]
+    fn test_max_tokens_zero_fails() {
+        let config = server_with(|s| s.max_tokens = 0);
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert!(result.failures >= 1);
+    }
+
+    #[test]
+    fn test_timeout_zero_fails() {
+        let config = server_with(|s| s.timeout = 0.0);
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert!(result.failures >= 1);
+    }
+
+    #[test]
+    fn test_timeout_negative_fails() {
+        let config = server_with(|s| s.timeout = -1.0);
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert!(result.failures >= 1);
+    }
+
+    #[test]
+    fn test_timeout_nan_fails() {
+        let config = server_with(|s| s.timeout = f64::NAN);
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert!(result.failures >= 1);
+    }
+
+    #[test]
+    fn test_timeout_infinite_fails() {
+        let config = server_with(|s| s.timeout = f64::INFINITY);
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert!(result.failures >= 1);
+    }
+
+    #[test]
+    fn test_timeout_unusually_high_warns() {
+        let config = server_with(|s| s.timeout = 3600.0);
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert!(result.warnings >= 1);
+        assert_eq!(result.failures, 0);
+    }
+
+    #[test]
+    fn test_max_body_size_zero_fails() {
+        let config = server_with(|s| s.max_body_size = 0);
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert!(result.failures >= 1);
+    }
+
+    #[test]
+    fn test_max_body_size_huge_warns() {
+        let config = server_with(|s| s.max_body_size = (1 << 30) + 1);
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert!(result.warnings >= 1);
+        assert_eq!(result.failures, 0);
+    }
+
+    #[test]
+    fn test_host_localhost_passes() {
+        let config = server_with(|s| s.host = "localhost".to_owned());
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert_eq!(result.failures, 0);
+        assert_eq!(result.warnings, 0);
+    }
+
+    #[test]
+    fn test_host_ipv4_passes() {
+        let config = server_with(|s| s.host = "127.0.0.1".to_owned());
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert_eq!(result.failures, 0);
+        assert_eq!(result.warnings, 0);
+    }
+
+    #[test]
+    fn test_host_ipv6_passes() {
+        let config = server_with(|s| s.host = "::1".to_owned());
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert_eq!(result.failures, 0);
+        assert_eq!(result.warnings, 0);
+    }
+
+    #[test]
+    fn test_host_garbage_warns() {
+        let config = server_with(|s| s.host = "not a valid host!!".to_owned());
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert!(result.warnings >= 1);
+    }
+
     // -- Port availability --
 
     #[test]
@@ -654,6 +861,39 @@ mod tests {
         let mut result = empty_result();
         check_port_availability(&config, &mut result);
         assert_eq!(result.passes, 1);
+    }
+
+    #[test]
+    fn test_port_available_ipv6_localhost() {
+        let config = HiggsConfig {
+            server: ServerSection {
+                host: "::1".to_owned(),
+                port: 0,
+                ..ServerSection::default()
+            },
+            ..HiggsConfig::default()
+        };
+        let mut result = empty_result();
+        check_port_availability(&config, &mut result);
+        assert_eq!(result.passes, 1);
+    }
+
+    #[test]
+    fn test_api_key_set_passes() {
+        let config = server_with(|s| s.api_key = Some("secret".to_owned()));
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert_eq!(result.failures, 0);
+        assert_eq!(result.warnings, 0);
+    }
+
+    #[test]
+    fn test_rate_limit_nonzero_passes() {
+        let config = server_with(|s| s.rate_limit = 120);
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert_eq!(result.failures, 0);
+        assert_eq!(result.warnings, 0);
     }
 
     // -- Auto router --
