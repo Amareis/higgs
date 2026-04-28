@@ -299,12 +299,32 @@ where
     let dir = results_dir().join(&output.metadata.bench_name);
     fs::create_dir_all(&dir).with_context(|| format!("create results dir {}", dir.display()))?;
 
-    let model_key = output
-        .metadata
-        .model
-        .as_ref()
-        .map_or_else(|| "no-model".into(), |m| m.key.clone());
-    let ts = output.metadata.started_at.format("%Y%m%dT%H%M%SZ");
+    // Sanitize the model key before using it in the path: `--manifest`
+    // could feed in a key containing `/` or `..` and the filename gets
+    // joined into `target/bench-results/<bench>/`. Map anything outside
+    // [A-Za-z0-9._-] to `_`.
+    let model_key = output.metadata.model.as_ref().map_or_else(
+        || "no-model".to_owned(),
+        |m| {
+            m.key
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect()
+        },
+    );
+    // Include subsecond resolution so same-second reruns of the same
+    // (commit, model, bench) don't collide and overwrite each other.
+    let ts = format!(
+        "{}-{:03}",
+        output.metadata.started_at.format("%Y%m%dT%H%M%SZ"),
+        output.metadata.started_at.timestamp_subsec_millis()
+    );
     let filename = format!(
         "{}__{}__{}.json",
         output.metadata.git_commit_short, model_key, ts
