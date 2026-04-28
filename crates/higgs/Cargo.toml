@@ -50,3 +50,8 @@ tower = { version = "0.5", features = ["util"] }
 hyper = "1"
 tempfile = "3.27.0"
 wiremock = "0.6"
+criterion.workspace = true
+
+[[bench]]
+name = "sse_serialize"
+harness = false

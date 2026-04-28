@@ -13,6 +13,8 @@ pub mod model_resolver;
 pub mod proxy;
 pub mod router;
 pub mod routes;
+#[doc(hidden)]
+pub mod sse;
 pub mod state;
 pub mod translate;
 pub mod tui;

@@ -22,10 +22,10 @@ use crate::{
     router::ResolvedRoute,
     state::{Engine, SharedState},
     types::anthropic::{
-        AnthropicUsage, ContentBlockDeltaEvent, ContentBlockResponse, ContentBlockStartEvent,
-        ContentBlockStartPayload, ContentBlockStopEvent, CountTokensRequest, CountTokensResponse,
-        CreateMessageRequest, CreateMessageResponse, MessageDelta, MessageDeltaEvent,
-        MessageStartEvent, MessageStartPayload, MessageStopEvent, TextDelta,
+        AnthropicUsage, ContentBlockResponse, ContentBlockStartEvent, ContentBlockStartPayload,
+        ContentBlockStopEvent, CountTokensRequest, CountTokensResponse, CreateMessageRequest,
+        CreateMessageResponse, MessageDelta, MessageDeltaEvent, MessageStartEvent,
+        MessageStartPayload, MessageStopEvent, TextDelta,
     },
 };
 use higgs_models::SamplingParams;
@@ -409,19 +409,16 @@ fn create_message_stream(
             higgs_engine::reasoning_parser::StreamingReasoningTracker::new()
         };
 
+        let mut delta_writer = crate::sse::AnthropicDeltaWriter::new();
         while let Some(output) = rx.recv().await {
             let (visible, _reasoning) = reasoning_tracker.process(&output.new_text);
 
             if !visible.is_empty() {
-                let delta_event = ContentBlockDeltaEvent {
-                    event_type: "content_block_delta",
-                    index: 0,
-                    delta: TextDelta {
-                        delta_type: "text_delta",
-                        text: visible,
-                    },
+                let td = TextDelta {
+                    delta_type: "text_delta",
+                    text: visible,
                 };
-                match serde_json::to_string(&delta_event) {
+                match delta_writer.write(&td) {
                     Ok(json) => yield Ok(Event::default().event("content_block_delta").data(json)),
                     Err(e) => tracing::error!(error = %e, "Failed to serialize SSE chunk"),
                 }
@@ -435,15 +432,11 @@ fn create_message_stream(
         // Flush any remaining visible text buffered by the reasoning tracker
         let (flush_visible, _flush_reasoning) = reasoning_tracker.flush();
         if !flush_visible.is_empty() {
-            let delta_event = ContentBlockDeltaEvent {
-                event_type: "content_block_delta",
-                index: 0,
-                delta: TextDelta {
-                    delta_type: "text_delta",
-                    text: flush_visible,
-                },
+            let td = TextDelta {
+                delta_type: "text_delta",
+                text: flush_visible,
             };
-            match serde_json::to_string(&delta_event) {
+            match delta_writer.write(&td) {
                 Ok(json) => yield Ok(Event::default().event("content_block_delta").data(json)),
                 Err(e) => tracing::error!(error = %e, "Failed to serialize SSE chunk"),
             }
