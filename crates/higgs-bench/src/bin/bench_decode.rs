@@ -368,8 +368,8 @@ async fn run_trial(
     // visible token (already counted as TTFT, not part of decode wall). Fall
     // back to SSE-chunk count only when the server omits the usage chunk
     // (legacy / non-higgs backends that don't honor `stream_options.include_usage`).
-    let tokens_after_first = server_completion_tokens
-        .map_or(chunks_after_first, |total| total.saturating_sub(1));
+    let tokens_after_first =
+        server_completion_tokens.map_or(chunks_after_first, |total| total.saturating_sub(1));
     let decode_tokps = if after_first.as_secs_f64() > 0.0 && tokens_after_first > 0 {
         f64::from(tokens_after_first) / after_first.as_secs_f64()
     } else {
