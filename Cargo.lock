@@ -1548,6 +1548,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "criterion",
  "crossterm",
  "ctrlc",
  "directories",

@@ -21,9 +21,8 @@ use crate::{
     router::ResolvedRoute,
     state::{Engine, SharedState},
     types::openai::{
-        ChoiceLogprobs, CompletionChoice, CompletionChunk, CompletionChunkChoice,
-        CompletionRequest, CompletionResponse, CompletionUsage, StopSequence, TokenLogprob,
-        TopLogprob,
+        ChoiceLogprobs, CompletionChoice, CompletionChunkChoice, CompletionRequest,
+        CompletionResponse, CompletionUsage, StopSequence, TokenLogprob, TopLogprob,
     },
 };
 use higgs_models::SamplingParams;
@@ -264,21 +263,16 @@ fn completions_stream(
     });
 
     let stream = async_stream::stream! {
+        let mut writer = crate::sse::CompletionChunkWriter::new(&request_id, created, &model);
         let mut output_tokens: u64 = 0;
         while let Some(output) = rx.recv().await {
             output_tokens = u64::from(output.completion_tokens);
-            let chunk = CompletionChunk {
-                id: request_id.clone(),
-                object: "text_completion",
-                created,
-                model: model.clone(),
-                choices: vec![CompletionChunkChoice {
-                    index: 0,
-                    text: output.new_text,
-                    finish_reason: output.finish_reason,
-                }],
+            let choice = CompletionChunkChoice {
+                index: 0,
+                text: output.new_text,
+                finish_reason: output.finish_reason,
             };
-            match serde_json::to_string(&chunk) {
+            match writer.write(&choice) {
                 Ok(json) => yield Ok(Event::default().data(json)),
                 Err(e) => tracing::error!(error = %e, "Failed to serialize SSE chunk"),
             }
