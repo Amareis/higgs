@@ -46,6 +46,115 @@ Current examples that informed the default:
 
 That is why `auto` resolves to `balanced` for small and medium models, and `throughput` for large and huge models.
 
+## Rust bench crate (`higgs-bench`)
+
+The `crates/higgs-bench/` crate hosts native-Rust end-to-end bench
+binaries. Each binary drives a running higgs server (or, for MLX-direct
+benches, the engine in-process) and produces output that satisfies the
+contract below.
+
+### Bench output contract
+
+Every bench binary in `higgs-bench` emits a JSON object with three
+top-level keys: `metadata`, `params`, `results`.
+
+```json
+{
+  "metadata": {
+    "bench_name": "bench_decode",
+    "bench_version": "1.0.0",
+    "higgs_version": "1.0.0",
+    "git_commit": "abcdef1234...",
+    "git_commit_short": "abcdef1",
+    "git_dirty": false,
+    "started_at": "2026-04-28T00:00:00Z",
+    "duration_ms": 12345,
+    "host": { "hostname": "...", "os": "...", "cpu": "...", "ram_gb": 128.0, "gpu": "Apple Silicon (MLX)" },
+    "mlx_version": null,
+    "model": { "key": "qwen3-1.7B-4bit", "path": "...", "quantization": "4bit", "approx_size_gb": 1.2 },
+    "args": ["bench_decode", "--port", "8899", "--model", "qwen3-1.7B-4bit"]
+  },
+  "params":  { /* bench-specific */ },
+  "results": { /* bench-specific */ }
+}
+```
+
+`metadata.git_commit` and `git_dirty` are captured at compile time via
+the `built` crate; you must rebuild the bench binary to refresh them.
+
+Every binary supports two output formats:
+
+- `--format json` (default) — single JSON object, machine-parseable.
+- `--format markdown` — pasteable into PR descriptions. Includes a
+  "How to reproduce" code fence with the exact command (re-quoted from
+  `args`), a results table, and an environment table.
+
+Every run also persists the JSON to
+`target/bench-results/<bench_name>/<git_commit_short>__<model_key>__<timestamp>.json`,
+regardless of `--format`. This directory is gitignored.
+
+### Model manifest
+
+`benchmarks/models.toml` is the source of truth for which models the
+benches can target. Bench binaries take `--model <key>` and look up the
+entry by key.
+
+```toml
+[[models]]
+key = "qwen3-1.7B-4bit"
+label = "Qwen3-1.7B-4bit (Dense)"
+path = "mlx-community/Qwen3-1.7B-4bit"
+quantization = "4bit"
+approx_size_gb = 1.2
+context = 32768
+tags = ["small", "dense"]
+```
+
+Adding a model is one entry. Tags should mark size (`small`, `medium`,
+`large`) and architecture (`dense`, `moe`); benches that filter by tag
+will pick the model up automatically.
+
+### `bench_decode`
+
+Drives a running higgs server over the OpenAI streaming chat-completions
+API and reports per-trial decode tok/s + TTFT.
+
+```bash
+./target/release/higgs serve --model mlx-community/Qwen3-1.7B-4bit --port 8899 &
+cargo run --release -p higgs-bench --bin bench_decode -- \
+  --port 8899 --model qwen3-1.7B-4bit \
+  --max-tokens 200 --warmup 1 --trials 5 \
+  --temperature 0.7
+```
+
+`results` is `{ trials: [...], ttft_ms_{mean,median,p95,stdev},
+decode_tokps_{mean,median,p95,stdev} }`.
+
+### `bench_summarize`
+
+Walks `target/bench-results/`, picks the latest result per
+`(bench_name, model_key)` pair, and emits a Markdown table grouped by
+model. This is what the README quotes for headline numbers.
+
+```bash
+cargo run --release -p higgs-bench --bin bench_summarize
+```
+
+### Adding a new bench
+
+1. Create `crates/higgs-bench/src/bin/<name>.rs`.
+2. Capture metadata at startup with
+   `let mut metadata = higgs_bench::RunMetadata::capture("<name>");`.
+3. Look up the model with `higgs_bench::models::find_by_key(...)` and
+   set `metadata.model`.
+4. Define `Params` and `Results` structs (must implement `Serialize`).
+5. Build `BenchOutput { metadata, params, results }` and call
+   `higgs_bench::persist_result(&output)` plus
+   `higgs_bench::format_json` / `format_markdown` based on
+   `--format`.
+6. Document the new binary in this file with a one-line description and
+   a sample command.
+
 ## Caveats
 
 - Benchmark numbers depend on hardware class, prompt mix, quantization, and model family.
