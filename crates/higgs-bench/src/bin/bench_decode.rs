@@ -244,6 +244,7 @@ async fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_trial(
     client: &reqwest::Client,
     base_url: &str,
@@ -326,10 +327,16 @@ async fn run_trial(
             };
             // Terminal usage chunk: empty `choices`, populated `usage`.
             if let Some(usage) = value.get("usage").filter(|u| u.is_object()) {
-                if let Some(ct) = usage.get("completion_tokens").and_then(|n| n.as_u64()) {
+                if let Some(ct) = usage
+                    .get("completion_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                {
                     server_completion_tokens = Some(u32::try_from(ct).unwrap_or(u32::MAX));
                 }
-                if let Some(pt) = usage.get("prompt_tokens").and_then(|n| n.as_u64()) {
+                if let Some(pt) = usage
+                    .get("prompt_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                {
                     server_prompt_tokens = Some(u32::try_from(pt).unwrap_or(u32::MAX));
                 }
             }
@@ -357,15 +364,12 @@ async fn run_trial(
     let ttft_ms = first_at.duration_since(started).as_secs_f64() * 1000.0;
     let after_first = total_elapsed.saturating_sub(first_at.duration_since(started));
 
-    // Prefer server-reported completion_tokens. Fall back to SSE-chunk count
-    // only when the server omits the usage chunk (legacy / non-higgs backends
-    // that don't honor `stream_options.include_usage`).
-    let tokens_after_first = match server_completion_tokens {
-        // server reports total completion tokens; subtract one for the first
-        // visible token (already counted as TTFT, not part of decode wall).
-        Some(total) => total.saturating_sub(1),
-        None => chunks_after_first,
-    };
+    // Prefer server-reported completion_tokens. Subtract one for the first
+    // visible token (already counted as TTFT, not part of decode wall). Fall
+    // back to SSE-chunk count only when the server omits the usage chunk
+    // (legacy / non-higgs backends that don't honor `stream_options.include_usage`).
+    let tokens_after_first = server_completion_tokens
+        .map_or(chunks_after_first, |total| total.saturating_sub(1));
     let decode_tokps = if after_first.as_secs_f64() > 0.0 && tokens_after_first > 0 {
         f64::from(tokens_after_first) / after_first.as_secs_f64()
     } else {
