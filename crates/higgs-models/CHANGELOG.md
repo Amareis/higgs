@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0](https://github.com/panbanda/higgs/compare/higgs-models-v1.0.1...higgs-models-v1.1.0) (2026-04-28)
+
+
+### Performance Improvements
+
+* **sampling:** partial-sort path for small top-k ([67a5a06](https://github.com/panbanda/higgs/commit/67a5a06f479a9c0ded06af00a07ccafab392ef4c))
+* **sampling:** partial-sort path for small top-k ([bab4519](https://github.com/panbanda/higgs/commit/bab4519bdc5bb4d4f2ad7bc90086c054e55131b0))
+
 ## [1.0.1](https://github.com/panbanda/higgs/compare/higgs-models-v1.0.0...higgs-models-v1.0.1) (2026-04-27)
 
 

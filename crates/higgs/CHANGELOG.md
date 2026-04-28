@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0](https://github.com/panbanda/higgs/compare/higgs-v1.0.1...higgs-v1.1.0) (2026-04-28)
+
+
+### Features
+
+* **doctor:** validate ServerSection fields ([0250c42](https://github.com/panbanda/higgs/commit/0250c422d022e72a00095cd2def1ed5996dfb762))
+* **doctor:** validate ServerSection fields ([554371f](https://github.com/panbanda/higgs/commit/554371f890cf23a7e2fd1141109e51cb9f26c2d5))
+
+
+### Bug Fixes
+
+* **doctor:** bracket IPv6 host when binding port; add api_key/rate_limit positive-path tests ([7177476](https://github.com/panbanda/higgs/commit/717747662379fe1cf89b01b5db5fdf50246504a3))
+
 ## [1.0.1](https://github.com/panbanda/higgs/compare/higgs-v1.0.0...higgs-v1.0.1) (2026-04-27)
 
 
