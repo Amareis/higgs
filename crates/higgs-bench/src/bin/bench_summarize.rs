@@ -59,6 +59,7 @@ struct Row {
     headline: String,
 }
 
+#[allow(clippy::too_many_lines)]
 fn run(args: &Args) -> Result<()> {
     let dir = results_dir();
     let entries = collect_results(&dir)?;
@@ -150,6 +151,19 @@ fn run(args: &Args) -> Result<()> {
     let mut by_model: BTreeMap<String, Vec<Row>> = BTreeMap::new();
     for ((model, _bench), (_ts, row)) in latest {
         by_model.entry(model).or_default().push(row);
+    }
+
+    if by_model.is_empty() {
+        match args.format {
+            OutputFormat::Markdown => {
+                println!("# Bench summary\n");
+                println!("_No results matched the provided filters._\n");
+            }
+            OutputFormat::Json => {
+                println!("{}", serde_json::json!({"results": []}));
+            }
+        }
+        return Ok(());
     }
 
     match args.format {

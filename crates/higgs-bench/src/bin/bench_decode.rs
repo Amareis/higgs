@@ -150,6 +150,10 @@ fn main() -> ExitCode {
 }
 
 async fn run(args: Args) -> Result<()> {
+    if args.trials == 0 {
+        anyhow::bail!("--trials must be >= 1");
+    }
+
     let mut metadata = RunMetadata::capture("bench_decode");
     let started = Instant::now();
 
@@ -305,57 +309,37 @@ async fn run_trial(
     // Server-reported token counts from the terminal `usage` chunk (preferred).
     let mut server_completion_tokens: Option<u32> = None;
     let mut server_prompt_tokens: Option<u32> = None;
-    let mut buf = String::new();
+    // Byte buffer so multibyte UTF-8 sequences split across network chunks
+    // aren't corrupted by a per-chunk lossy decode.
+    let mut buf: Vec<u8> = Vec::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("read SSE chunk")?;
-        buf.push_str(&String::from_utf8_lossy(&chunk));
+        buf.extend_from_slice(&chunk);
 
-        while let Some(idx) = buf.find('\n') {
-            let line: String = buf.drain(..=idx).collect();
-            let line = line.trim();
-            if line.is_empty() || !line.starts_with("data:") {
-                continue;
-            }
-            let data = line[5..].trim();
-            if data == "[DONE]" {
-                continue;
-            }
-            let value: serde_json::Value = match serde_json::from_str(data) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            // Terminal usage chunk: empty `choices`, populated `usage`.
-            if let Some(usage) = value.get("usage").filter(|u| u.is_object()) {
-                if let Some(ct) = usage
-                    .get("completion_tokens")
-                    .and_then(serde_json::Value::as_u64)
-                {
-                    server_completion_tokens = Some(u32::try_from(ct).unwrap_or(u32::MAX));
-                }
-                if let Some(pt) = usage
-                    .get("prompt_tokens")
-                    .and_then(serde_json::Value::as_u64)
-                {
-                    server_prompt_tokens = Some(u32::try_from(pt).unwrap_or(u32::MAX));
-                }
-            }
-            let delta = value
-                .get("choices")
-                .and_then(|c| c.get(0))
-                .and_then(|c| c.get("delta"))
-                .and_then(|d| d.get("content"))
-                .and_then(|s| s.as_str());
-            if let Some(s) = delta {
-                if !s.is_empty() {
-                    if first_token_at.is_none() {
-                        first_token_at = Some(Instant::now());
-                    } else {
-                        chunks_after_first += 1;
-                    }
-                }
-            }
+        while let Some(idx) = buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = buf.drain(..=idx).collect();
+            handle_sse_line(
+                &line_bytes,
+                &mut first_token_at,
+                &mut chunks_after_first,
+                &mut server_completion_tokens,
+                &mut server_prompt_tokens,
+            );
         }
+    }
+
+    // Some servers close the stream without a trailing newline on the final
+    // `data:` line. Flush whatever's left so we don't drop the terminal usage
+    // chunk silently.
+    if !buf.is_empty() {
+        handle_sse_line(
+            &buf,
+            &mut first_token_at,
+            &mut chunks_after_first,
+            &mut server_completion_tokens,
+            &mut server_prompt_tokens,
+        );
     }
 
     let total_elapsed = started.elapsed();
@@ -386,4 +370,56 @@ async fn run_trial(
         total_tokens,
         wall_ms: total_elapsed.as_secs_f64() * 1000.0,
     })
+}
+
+/// Parse one raw SSE line (without trailing newline) and update the rolling
+/// counters. Tolerates non-UTF-8 prefixes, blank lines, and `[DONE]`.
+fn handle_sse_line(
+    line_bytes: &[u8],
+    first_token_at: &mut Option<Instant>,
+    chunks_after_first: &mut u32,
+    server_completion_tokens: &mut Option<u32>,
+    server_prompt_tokens: &mut Option<u32>,
+) {
+    let line = String::from_utf8_lossy(line_bytes);
+    let line = line.trim();
+    if line.is_empty() || !line.starts_with("data:") {
+        return;
+    }
+    let data = line[5..].trim();
+    if data == "[DONE]" {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+        return;
+    };
+    if let Some(usage) = value.get("usage").filter(|u| u.is_object()) {
+        if let Some(ct) = usage
+            .get("completion_tokens")
+            .and_then(serde_json::Value::as_u64)
+        {
+            *server_completion_tokens = Some(u32::try_from(ct).unwrap_or(u32::MAX));
+        }
+        if let Some(pt) = usage
+            .get("prompt_tokens")
+            .and_then(serde_json::Value::as_u64)
+        {
+            *server_prompt_tokens = Some(u32::try_from(pt).unwrap_or(u32::MAX));
+        }
+    }
+    let delta = value
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("delta"))
+        .and_then(|d| d.get("content"))
+        .and_then(|s| s.as_str());
+    if let Some(s) = delta {
+        if !s.is_empty() {
+            if first_token_at.is_none() {
+                *first_token_at = Some(Instant::now());
+            } else {
+                *chunks_after_first += 1;
+            }
+        }
+    }
 }
