@@ -140,6 +140,9 @@ uuid = { version = "1.23", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.10"
 
+# Benchmarking
+criterion = { version = "0.5", default-features = false }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

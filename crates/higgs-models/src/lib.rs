@@ -723,11 +723,14 @@ pub fn sample(logits: &Array, params: &SamplingParams) -> Result<Array, Exceptio
 
 /// Combined top-k + min-p + top-p filtering followed by categorical sampling.
 ///
-/// Sorts probabilities descending, applies all three filters as masks,
-/// renormalizes, then samples.
-#[allow(clippy::shadow_reuse)]
+/// When `top_k` is set and small (<= [`TOPK_PARTIAL_SORT_THRESHOLD`]) the
+/// partial-sort path is used: it picks the top-k vocab positions via
+/// `argpartition` and sorts only that small slice, instead of sorting the full
+/// vocab. Otherwise the full-sort path runs (necessary when top-p needs the
+/// full distribution's cumulative sum, or when k is large enough that partition
+/// + sort isn't a win).
 fn sample_filtered(logits: &Array, params: &SamplingParams) -> Result<Array, Exception> {
-    use mlx_rs::ops::{argsort_axis, concatenate_axis, maximum, softmax_axis};
+    use mlx_rs::ops::softmax_axis;
 
     let probs = softmax_axis(logits, -1, None)?;
     let n_vocab_i32 = *probs
@@ -737,17 +740,109 @@ fn sample_filtered(logits: &Array, params: &SamplingParams) -> Result<Array, Exc
     let n_vocab =
         usize::try_from(n_vocab_i32).map_err(|_| Exception::custom("negative vocab size"))?;
 
+    let effective_k = params.top_k.map_or(n_vocab, |k| {
+        usize::try_from(k).unwrap_or(1).clamp(1, n_vocab)
+    });
+
+    if effective_k <= TOPK_PARTIAL_SORT_THRESHOLD && effective_k < n_vocab {
+        sample_filtered_topk(&probs, effective_k, params)
+    } else {
+        sample_filtered_full(&probs, n_vocab_i32, n_vocab, effective_k, params)
+    }
+}
+
+/// Threshold at which `sample_filtered` switches from full argsort to partial sort.
+///
+/// Values below this win on the partial path; values at or above this match (or
+/// beat) the partition path in the full-sort path.
+pub const TOPK_PARTIAL_SORT_THRESHOLD: usize = 1024;
+
+/// Partial-sort path: argpartition for top-k, then small in-slice sort.
+///
+/// `k` must satisfy `0 < k < n_vocab`.
+#[allow(clippy::shadow_reuse)]
+fn sample_filtered_topk(
+    probs: &Array,
+    k: usize,
+    params: &SamplingParams,
+) -> Result<Array, Exception> {
+    use mlx_rs::ops::{
+        argpartition_axis, argsort_axis, concatenate_axis, indexing::IndexOp, maximum,
+    };
+
+    let k_i32 = i32::try_from(k).map_err(|_| Exception::custom("k overflow for i32"))?;
+
+    // Argpartition over negated probs: first `k` entries are indices of the
+    // top-k probabilities (in some order). The partition index is `k - 1` so
+    // positions `0..=k-1` end up holding the smallest negated probs (= top-k).
+    let neg_probs = probs.negative()?;
+    let part_indices = argpartition_axis(&neg_probs, k_i32 - 1, -1)?;
+    let topk_indices_unsorted = part_indices.index((.., 0..k_i32));
+    let topk_probs_unsorted = probs.take_along_axis(&topk_indices_unsorted, -1)?;
+
+    // Sort the small [..., k] slice in descending order.
+    let neg_topk = topk_probs_unsorted.negative()?;
+    let order = argsort_axis(&neg_topk, -1)?;
+    let topk_indices = topk_indices_unsorted.take_along_axis(&order, -1)?;
+    let topk_probs = topk_probs_unsorted.take_along_axis(&order, -1)?;
+
+    // Top-p mask via cumsum on the small slice.
+    let cumsum = topk_probs.cumsum(-1, None, None)?;
+    let cumsum_mask = cumsum.le(array!(params.top_p))?;
+
+    // Always keep at least the top token.
+    let ones = Array::ones::<f32>(&[1])?;
+    let zeros = Array::zeros::<f32>(&[k_i32 - 1])?;
+    let first_token_mask = if probs.ndim() > 1 {
+        concatenate_axis(&[&ones, &zeros], 0)?.reshape(&[1, -1])?
+    } else {
+        concatenate_axis(&[&ones, &zeros], 0)?
+    };
+    let top_p_mask = maximum(&cumsum_mask, &first_token_mask)?;
+
+    // Min-p mask: prob >= min_p * max_prob.
+    let combined = if let Some(min_p) = params.min_p.map(|v| v.clamp(0.0, 1.0)) {
+        let max_prob = topk_probs.max_axes(&[-1], true)?;
+        let threshold = max_prob.multiply(array!(min_p))?;
+        let min_p_mask = topk_probs.ge(threshold)?;
+        top_p_mask.multiply(min_p_mask)?
+    } else {
+        top_p_mask
+    };
+
+    let filtered = topk_probs.multiply(combined)?;
+    let sum = filtered.sum_axes(&[-1], true)?;
+    let normalized = filtered.divide(sum)?;
+
+    let log_probs = normalized.log()?;
+    let sampled = categorical!(log_probs)?;
+
+    // Map sampled position in [0, k) back to the original vocab index.
+    topk_indices
+        .take_along_axis(&sampled.reshape(&[-1, 1])?, -1)?
+        .squeeze_axes(&[-1])
+}
+
+/// Full-sort path used when the top-k cap is large or unset. Sorts the entire
+/// vocab via `argsort` and applies all three filters as masks.
+#[allow(clippy::shadow_reuse)]
+fn sample_filtered_full(
+    probs: &Array,
+    n_vocab_i32: i32,
+    n_vocab: usize,
+    effective_k: usize,
+    params: &SamplingParams,
+) -> Result<Array, Exception> {
+    use mlx_rs::ops::{argsort_axis, concatenate_axis, maximum};
+
     // Sort descending: negate, ascending argsort
     let neg_probs = probs.negative()?;
     let sorted_indices = argsort_axis(&neg_probs, -1)?;
     let sorted_probs = probs.take_along_axis(&sorted_indices, -1)?;
 
-    // --- Top-k mask (CPU): zero out positions beyond rank k ---
-    let k = params.top_k.map_or(n_vocab, |k| {
-        usize::try_from(k).unwrap_or(1).clamp(1, n_vocab)
-    });
+    // Top-k mask: zero out positions beyond rank k.
     let mut rank_mask_vec = vec![1.0f32; n_vocab];
-    for slot in rank_mask_vec.get_mut(k..).into_iter().flatten() {
+    for slot in rank_mask_vec.get_mut(effective_k..).into_iter().flatten() {
         *slot = 0.0;
     }
     let rank_mask = if probs.ndim() > 1 {
@@ -756,11 +851,9 @@ fn sample_filtered(logits: &Array, params: &SamplingParams) -> Result<Array, Exc
         Array::from_slice(&rank_mask_vec, &[n_vocab_i32])
     };
 
-    // --- Top-p mask (GPU): cumulative probability ---
     let cumsum = sorted_probs.cumsum(-1, None, None)?;
     let cumsum_mask = cumsum.le(array!(params.top_p))?;
 
-    // Always keep at least the top token
     let ones = Array::ones::<f32>(&[1])?;
     let zeros = Array::zeros::<f32>(&[n_vocab_i32 - 1])?;
     let first_token_mask = if probs.ndim() > 1 {
@@ -770,7 +863,6 @@ fn sample_filtered(logits: &Array, params: &SamplingParams) -> Result<Array, Exc
     };
     let top_p_mask = maximum(&cumsum_mask, &first_token_mask)?;
 
-    // --- Min-p mask (GPU): prob >= min_p * max_prob ---
     let combined = if let Some(min_p) = params.min_p.map(|v| v.clamp(0.0, 1.0)) {
         let max_prob = sorted_probs.max_axes(&[-1], true)?;
         let threshold = max_prob.multiply(array!(min_p))?;
@@ -781,16 +873,11 @@ fn sample_filtered(logits: &Array, params: &SamplingParams) -> Result<Array, Exc
     };
 
     let filtered = sorted_probs.multiply(combined)?;
-
-    // Re-normalize
     let sum = filtered.sum_axes(&[-1], true)?;
     let normalized = filtered.divide(sum)?;
 
-    // categorical! expects unnormalized logits (applies softmax internally),
-    // so convert back to log-space
     let log_probs = normalized.log()?;
     let sampled = categorical!(log_probs)?;
-    // Map back to original indices
     sorted_indices
         .take_along_axis(&sampled.reshape(&[-1, 1])?, -1)?
         .squeeze_axes(&[-1])
