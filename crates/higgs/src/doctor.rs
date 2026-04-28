@@ -388,7 +388,12 @@ fn check_auto_router(config: &HiggsConfig, result: &mut DoctorResult) {
 }
 
 fn check_port_availability(config: &HiggsConfig, result: &mut DoctorResult) {
-    let addr = format!("{}:{}", config.server.host, config.server.port);
+    let host = &config.server.host;
+    let port = config.server.port;
+    let addr = host.parse::<std::net::IpAddr>().map_or_else(
+        |_| format!("{host}:{port}"),
+        |ip| std::net::SocketAddr::new(ip, port).to_string(),
+    );
     match std::net::TcpListener::bind(&addr) {
         Ok(_) => pass(&format!("port {} available", config.server.port), result),
         Err(err) => warn(
@@ -856,6 +861,39 @@ mod tests {
         let mut result = empty_result();
         check_port_availability(&config, &mut result);
         assert_eq!(result.passes, 1);
+    }
+
+    #[test]
+    fn test_port_available_ipv6_localhost() {
+        let config = HiggsConfig {
+            server: ServerSection {
+                host: "::1".to_owned(),
+                port: 0,
+                ..ServerSection::default()
+            },
+            ..HiggsConfig::default()
+        };
+        let mut result = empty_result();
+        check_port_availability(&config, &mut result);
+        assert_eq!(result.passes, 1);
+    }
+
+    #[test]
+    fn test_api_key_set_passes() {
+        let config = server_with(|s| s.api_key = Some("secret".to_owned()));
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert_eq!(result.failures, 0);
+        assert_eq!(result.warnings, 0);
+    }
+
+    #[test]
+    fn test_rate_limit_nonzero_passes() {
+        let config = server_with(|s| s.rate_limit = 120);
+        let mut result = empty_result();
+        check_server_section(&config, &mut result);
+        assert_eq!(result.failures, 0);
+        assert_eq!(result.warnings, 0);
     }
 
     // -- Auto router --
