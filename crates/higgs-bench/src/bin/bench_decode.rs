@@ -251,10 +251,20 @@ async fn run_trial(
     prompt: &str,
     args: &Args,
 ) -> Result<TrialResult> {
+    // Request the terminal usage chunk so we measure throughput against
+    // server-reported token counts rather than SSE chunk count (which can
+    // diverge once the server emits buffered visible text).
+    //
+    // Disable reasoning so the bench measures time-to-first-generated-token,
+    // not time-to-first-visible-answer. Qwen3.5+ models default to thinking
+    // mode in higgs and would otherwise emit `reasoning_content` deltas the
+    // current code skips, biasing TTFT high.
     let mut body = serde_json::json!({
         "model": model_path,
         "messages": [{"role": "user", "content": prompt}],
         "stream": true,
+        "stream_options": { "include_usage": true },
+        "reasoning": { "effort": "none" },
         "max_tokens": args.max_tokens,
         "temperature": args.temperature,
     });
@@ -288,7 +298,12 @@ async fn run_trial(
 
     let mut stream = resp.bytes_stream();
     let mut first_token_at: Option<Instant> = None;
-    let mut tokens_seen: u32 = 0;
+    // SSE-chunk-based estimate. Used only as a fallback when the server
+    // doesn't send a terminal usage chunk.
+    let mut chunks_after_first: u32 = 0;
+    // Server-reported token counts from the terminal `usage` chunk (preferred).
+    let mut server_completion_tokens: Option<u32> = None;
+    let mut server_prompt_tokens: Option<u32> = None;
     let mut buf = String::new();
 
     while let Some(chunk) = stream.next().await {
@@ -309,6 +324,15 @@ async fn run_trial(
                 Ok(v) => v,
                 Err(_) => continue,
             };
+            // Terminal usage chunk: empty `choices`, populated `usage`.
+            if let Some(usage) = value.get("usage").filter(|u| u.is_object()) {
+                if let Some(ct) = usage.get("completion_tokens").and_then(|n| n.as_u64()) {
+                    server_completion_tokens = Some(u32::try_from(ct).unwrap_or(u32::MAX));
+                }
+                if let Some(pt) = usage.get("prompt_tokens").and_then(|n| n.as_u64()) {
+                    server_prompt_tokens = Some(u32::try_from(pt).unwrap_or(u32::MAX));
+                }
+            }
             let delta = value
                 .get("choices")
                 .and_then(|c| c.get(0))
@@ -320,7 +344,7 @@ async fn run_trial(
                     if first_token_at.is_none() {
                         first_token_at = Some(Instant::now());
                     } else {
-                        tokens_seen += 1;
+                        chunks_after_first += 1;
                     }
                 }
             }
@@ -332,17 +356,30 @@ async fn run_trial(
         first_token_at.ok_or_else(|| anyhow::anyhow!("no streamed tokens received from server"))?;
     let ttft_ms = first_at.duration_since(started).as_secs_f64() * 1000.0;
     let after_first = total_elapsed.saturating_sub(first_at.duration_since(started));
-    let decode_tokps = if after_first.as_secs_f64() > 0.0 && tokens_seen > 0 {
-        f64::from(tokens_seen) / after_first.as_secs_f64()
+
+    // Prefer server-reported completion_tokens. Fall back to SSE-chunk count
+    // only when the server omits the usage chunk (legacy / non-higgs backends
+    // that don't honor `stream_options.include_usage`).
+    let tokens_after_first = match server_completion_tokens {
+        // server reports total completion tokens; subtract one for the first
+        // visible token (already counted as TTFT, not part of decode wall).
+        Some(total) => total.saturating_sub(1),
+        None => chunks_after_first,
+    };
+    let decode_tokps = if after_first.as_secs_f64() > 0.0 && tokens_after_first > 0 {
+        f64::from(tokens_after_first) / after_first.as_secs_f64()
     } else {
         0.0
     };
 
+    let total_tokens = server_completion_tokens.unwrap_or(chunks_after_first + 1);
+    let _ = server_prompt_tokens; // currently unused; surface in future result schema.
+
     Ok(TrialResult {
         ttft_ms,
         decode_tokps,
-        tokens_after_first: tokens_seen,
-        total_tokens: tokens_seen + 1,
+        tokens_after_first,
+        total_tokens,
         wall_ms: total_elapsed.as_secs_f64() * 1000.0,
     })
 }

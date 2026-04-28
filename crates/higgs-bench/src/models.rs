@@ -9,20 +9,30 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// One model entry from `benchmarks/models.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
+    /// Unique key passed to `--model` on bench CLIs.
     pub key: String,
+    /// Human-readable display name (used in summary tables).
     pub label: String,
+    /// Model path: `HuggingFace` repo ID or absolute local path.
     pub path: String,
+    /// Quantization format, e.g. `4bit`, `3bit`.
     pub quantization: String,
+    /// Approximate model size in gigabytes.
     pub approx_size_gb: f64,
+    /// Maximum context length in tokens.
     pub context: u32,
+    /// Optional tags for filtering, e.g. `small`, `dense`, `moe`, `h2h`.
     #[serde(default)]
     pub tags: Vec<String>,
 }
 
+/// Top-level structure of `benchmarks/models.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
+    /// All model entries declared in the manifest.
     #[serde(default)]
     pub models: Vec<Model>,
 }

@@ -130,6 +130,14 @@ cargo run --release -p higgs-bench --bin bench_decode -- \
 `results` is `{ trials: [...], ttft_ms_{mean,median,p95,stdev},
 decode_tokps_{mean,median,p95,stdev} }`.
 
+`ttft_ms` measures request start → first non-empty streamed content token.
+`decode_tokps` measures tokens/sec **after** that first token boundary; it
+uses the server-reported `completion_tokens` from the terminal `usage` chunk
+(higgs honors `stream_options.include_usage: true`) and only falls back to
+SSE chunk count for backends that don't emit usage. The bench also sends
+`reasoning: { effort: "none" }` so decode timing reflects time-to-generate,
+not time-to-visible-answer for thinking-mode models.
+
 ### `bench_summarize`
 
 Walks `target/bench-results/`, picks the latest result per

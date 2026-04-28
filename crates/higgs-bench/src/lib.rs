@@ -34,14 +34,13 @@ pub const BENCH_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Returns the short git commit hash captured at compile time.
 #[must_use]
 pub fn git_commit_short() -> String {
-    built_info::GIT_COMMIT_HASH_SHORT
-        .map_or_else(|| "unknown".into(), std::string::ToString::to_string)
+    built_info::GIT_COMMIT_HASH_SHORT.map_or_else(|| "unknown".into(), str::to_owned)
 }
 
 /// Returns the full git commit hash captured at compile time.
 #[must_use]
 pub fn git_commit() -> String {
-    built_info::GIT_COMMIT_HASH.map_or_else(|| "unknown".into(), std::string::ToString::to_string)
+    built_info::GIT_COMMIT_HASH.map_or_else(|| "unknown".into(), str::to_owned)
 }
 
 /// Returns whether the working tree was dirty at compile time.
@@ -50,12 +49,18 @@ pub fn git_dirty() -> bool {
     built_info::GIT_DIRTY.unwrap_or(false)
 }
 
+/// Information about the host machine where the benchmark ran.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostInfo {
+    /// Machine hostname.
     pub hostname: String,
+    /// Operating system name, version, and kernel.
     pub os: String,
+    /// CPU brand string.
     pub cpu: String,
+    /// Total RAM in gigabytes.
     pub ram_gb: f64,
+    /// GPU identifier, if detected.
     pub gpu: Option<String>,
 }
 
@@ -77,9 +82,9 @@ impl HostInfo {
             .first()
             .map_or_else(|| "unknown".into(), |c| c.brand().trim().to_owned());
 
-        let total_kb = sys.total_memory();
-        // sysinfo returns bytes since 0.30.
-        let ram_gb = (total_kb as f64) / 1_073_741_824.0_f64;
+        // sysinfo's `total_memory()` returns bytes since 0.30.
+        let total_bytes = sys.total_memory();
+        let ram_gb = (total_bytes as f64) / 1_073_741_824.0_f64;
 
         Self {
             hostname,
@@ -96,32 +101,52 @@ fn round2(v: f64) -> f64 {
 }
 
 fn detect_gpu() -> Option<String> {
-    // On Apple Silicon the GPU label is "Apple <CPU brand>" — sysinfo
-    // doesn't expose GPU info portably. Leave as best-effort.
-    cfg!(target_os = "macos").then(|| "Apple Silicon (MLX)".into())
+    // sysinfo doesn't expose GPU info portably; only label macOS+aarch64 as
+    // Apple Silicon. Intel Macs return None rather than getting mislabeled.
+    (cfg!(target_os = "macos") && std::env::consts::ARCH == "aarch64")
+        .then(|| "Apple Silicon (MLX)".into())
 }
 
+/// The model under test, captured into bench output for reproducibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
+    /// Manifest key (e.g., `qwen3-1.7B-4bit`).
     pub key: String,
+    /// Model path used (`HuggingFace` repo ID or local path).
     pub path: String,
+    /// Quantization format (e.g., `4bit`).
     pub quantization: String,
+    /// Approximate model size in gigabytes.
     pub approx_size_gb: f64,
 }
 
+/// Reproducibility metadata recorded with every bench run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunMetadata {
+    /// Bench binary name (e.g., `bench_decode`).
     pub bench_name: String,
+    /// `higgs-bench` crate version.
     pub bench_version: String,
+    /// `higgs` server version under test, when known.
     pub higgs_version: Option<String>,
+    /// Full git commit captured at compile time.
     pub git_commit: String,
+    /// Short git commit (first 7 chars).
     pub git_commit_short: String,
+    /// Whether the working tree was dirty at compile time.
     pub git_dirty: bool,
+    /// RFC3339 UTC timestamp when the bench run started.
     pub started_at: DateTime<Utc>,
+    /// Wall-clock time of the entire bench run, in milliseconds.
     pub duration_ms: u64,
+    /// Host machine information (CPU, RAM, OS, GPU).
     pub host: HostInfo,
+    /// MLX runtime version when known.
     pub mlx_version: Option<String>,
+    /// Model under test; `None` for benches that don't pin to a model.
     pub model: Option<ModelInfo>,
+    /// Full argv that produced this run (used for the "How to reproduce"
+    /// block in `--format markdown`).
     pub args: Vec<String>,
 }
 
@@ -148,13 +173,17 @@ impl RunMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Standardized output envelope produced by every bench binary.
 pub struct BenchOutput<P, R>
 where
     P: Serialize,
     R: Serialize,
 {
+    /// Reproducibility metadata (host, model, git, argv, timing).
     pub metadata: RunMetadata,
+    /// Bench-specific parameters (CLI flags, prompt, etc.).
     pub params: P,
+    /// Bench-specific results (numbers, derived stats).
     pub results: R,
 }
 
@@ -387,7 +416,10 @@ pub fn collect_results(root: &Path) -> Result<Vec<StoredResult>> {
 
 /// One row of a persisted bench result (raw JSON).
 #[derive(Debug, Clone)]
+/// One persisted JSON result, returned by `collect_results`.
 pub struct StoredResult {
+    /// Path to the JSON file under `target/bench-results/<bench>/...`.
     pub path: PathBuf,
+    /// Parsed JSON content.
     pub value: serde_json::Value,
 }
