@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.1](https://github.com/panbanda/higgs/compare/higgs-v1.1.0...higgs-v1.1.1) (2026-04-28)
+
+
+### Performance Improvements
+
+* **sse:** pre-serialize static chunk fields for streaming routes ([056f4b4](https://github.com/panbanda/higgs/commit/056f4b4e316d27ab5c960b954619996f63653942))
+* **sse:** pre-serialize static chunk fields for streaming routes ([d8e02ba](https://github.com/panbanda/higgs/commit/d8e02ba9114f799cf47ebc6074385c14b7cf44cf))
+
 ## [1.1.0](https://github.com/panbanda/higgs/compare/higgs-v1.0.1...higgs-v1.1.0) (2026-04-28)
 
 
