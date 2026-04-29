@@ -1,0 +1,46 @@
+# Higgs bench model manifest.
+#
+# Source of truth for which models the `higgs-bench` binaries can target.
+# Bench binaries take `--model <key>` and look up the entry below; pass
+# `--tag <tag>` to run against everything matching a tag.
+#
+# Adding a model is one entry. After adding, you can run e.g.
+#   cargo run --release -p higgs-bench --bin bench_decode -- \
+#     --model <key> --port 8899
+# and paste the JSON output into your PR description.
+
+[[models]]
+key = "qwen3-1.7B-4bit"
+label = "Qwen3-1.7B-4bit (Dense)"
+path = "mlx-community/Qwen3-1.7B-4bit"
+quantization = "4bit"
+approx_size_gb = 1.2
+context = 32768
+tags = ["small", "dense"]
+
+[[models]]
+key = "deepseek-v2-lite-4bit"
+label = "DeepSeek-V2-Lite-4bit (MoE)"
+path = "mlx-community/DeepSeek-Coder-V2-Lite-Instruct-4bit-mlx"
+quantization = "4bit"
+approx_size_gb = 9.5
+context = 32768
+tags = ["medium", "moe"]
+
+[[models]]
+key = "qwen3.5-27B-4bit"
+label = "Qwen3.5-27B-4bit (Dense)"
+path = "mlx-community/Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-4bit"
+quantization = "4bit"
+approx_size_gb = 16.0
+context = 32768
+tags = ["large", "dense"]
+
+[[models]]
+key = "qwen3.5-35B-a3b-3bit"
+label = "Qwen3.5-35B-A3B-3bit (MoE)"
+path = "NexVeridian/Qwen3.5-35B-A3B-3bit"
+quantization = "3bit"
+approx_size_gb = 14.0
+context = 32768
+tags = ["large", "moe"]
