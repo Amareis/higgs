@@ -84,7 +84,7 @@ jobs:
         run: cargo clippy --all-targets --all-features
 
   msrv:
-    name: MSRV (1.88.0)
+    name: MSRV
     runs-on: macos-latest
     permissions:
       contents: read
@@ -105,7 +105,7 @@ jobs:
         run: cargo check --all-features
 
   coverage:
-    name: Coverage (70%)
+    name: Coverage
     runs-on: macos-latest
     permissions:
       contents: read
@@ -170,9 +170,10 @@ jobs:
           fetch-depth: 0
 
       - name: Run Omen
-        uses: panbanda/omen@omen-v4.21.2
+        uses: panbanda/omen@omen-v4.24.1
         id: omen
         with:
+          version: "4.24.1"
           comment: false
           label: false
           check: false
