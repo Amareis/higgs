@@ -173,6 +173,7 @@ jobs:
         uses: panbanda/omen@omen-v4.24.0
         id: omen
         with:
+          version: "4.24.0"
           comment: false
           label: false
           check: false
