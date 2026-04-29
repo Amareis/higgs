@@ -170,7 +170,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run Omen
-        uses: panbanda/omen@omen-v4.21.2
+        uses: panbanda/omen@omen-v4.24.1
         id: omen
         with:
           comment: false
