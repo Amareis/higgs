@@ -157,7 +157,7 @@ impl LlavaQwen2Model {
     pub fn forward_multimodal<C: KeyValueCache>(
         &mut self,
         input_ids: &Array,
-        pixel_values: &Array,
+        images: &[crate::ProcessedImage],
         cache: &mut Vec<Option<C>>,
     ) -> Result<Array, Exception> {
         // Validate batch=1 assumption
@@ -171,7 +171,8 @@ impl LlavaQwen2Model {
                 "LLaVA-Qwen2 only supports batch_size=1, got {batch}"
             )));
         }
-        let image_features = self.encode_image(pixel_values)?;
+        let img = images.first().ok_or_else(|| Exception::custom("no images provided"))?;
+        let image_features = self.encode_image(&img.pixel_values)?;
         // Replace IMAGE_TOKEN_INDEX sentinel with 0 before embedding lookup to
         // avoid out-of-bounds access. merge_embeddings overwrites these positions.
         let sentinel = Array::from_slice(&[IMAGE_TOKEN_INDEX], &[1]);

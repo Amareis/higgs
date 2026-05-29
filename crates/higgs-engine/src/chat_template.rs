@@ -10,6 +10,8 @@ pub struct ChatMessage {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing)]
+    pub num_images: usize,
 }
 
 /// Renders chat messages using a Jinja2 template (`HuggingFace` format).
@@ -194,6 +196,7 @@ mod tests {
             role: role.to_owned(),
             content: content.to_owned(),
             tool_calls: None,
+            num_images: 0,
         }
     }
 

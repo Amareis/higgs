@@ -258,15 +258,9 @@ async fn chat_completions_non_streaming(
     let want_logprobs = req.logprobs.unwrap_or(false);
     let top_logprobs = req.top_logprobs;
 
-    // Extract images and inject <image> placeholders for VLMs
+    // Extract images from message content parts
     let images = extract_images(&req.messages);
-    let effective_messages = if images.is_empty() {
-        req.messages.clone()
-    } else {
-        inject_image_placeholders(&req.messages)
-    };
-
-    let messages = convert_messages(&effective_messages);
+    let messages = convert_messages(&req.messages);
     let tools = req.tools.as_deref();
     let thinking_enabled = crate::reasoning::effective_thinking_enabled(
         engine.enable_thinking(),
@@ -274,25 +268,29 @@ async fn chat_completions_non_streaming(
         req.reasoning.as_ref(),
     );
 
-    let mut prompt_tokens = engine
-        .prepare_chat_prompt_with_thinking(&messages, tools, thinking_enabled)
-        .map_err(ServerError::Engine)?;
-
-    // Preprocess images for VLM
-    let pixel_values = if !images.is_empty() && engine.is_vlm() {
-        engine.replace_image_tokens(&mut prompt_tokens);
+    // Preprocess images and prepare multimodal prompt
+    let (prompt_tokens, images_data) = if !images.is_empty() && engine.is_vlm() {
         let image_size = engine.vlm_image_size().unwrap_or(384);
         #[allow(clippy::as_conversions, clippy::cast_sign_loss)]
         let size = image_size as u32;
-        let first_image = images
-            .into_iter()
-            .next()
-            .ok_or_else(|| ServerError::BadRequest("Image data is empty".to_owned()))?;
-        let pv = higgs_models::siglip::preprocess_image(&first_image, size)
-            .map_err(|e| ServerError::InternalError(format!("Image preprocessing failed: {e}")))?;
-        Some(pv)
+        let mut processed_images = Vec::with_capacity(images.len());
+        for img_bytes in &images {
+            let pv = higgs_models::siglip::preprocess_image(img_bytes, size).map_err(|e| {
+                ServerError::InternalError(format!("Image preprocessing failed: {e}"))
+            })?;
+            processed_images.push(higgs_models::ProcessedImage {
+                pixel_values: pv,
+                grid_thw: None,
+            });
+        }
+        engine
+            .prepare_multimodal_prompt(&messages, &processed_images, tools, thinking_enabled)
+            .map_err(ServerError::Engine)?
     } else {
-        None
+        let tokens = engine
+            .prepare_chat_prompt_with_thinking(&messages, tools, thinking_enabled)
+            .map_err(ServerError::Engine)?;
+        (tokens, None)
     };
 
     let constraint = build_constraint(req.response_format.as_ref(), &engine)?;
@@ -308,7 +306,7 @@ async fn chat_completions_non_streaming(
             top_logprobs,
             thinking_enabled,
             constraint,
-            pixel_values,
+            images_data,
         )
     })
     .await
@@ -438,39 +436,36 @@ fn chat_completions_stream(
 
     // Extract images and inject <image> placeholders for VLMs
     let images = extract_images(&req.messages);
-    let effective_messages = if images.is_empty() {
-        req.messages.clone()
-    } else {
-        inject_image_placeholders(&req.messages)
-    };
-
-    let messages = convert_messages(&effective_messages);
+    let messages = convert_messages(&req.messages);
     let thinking_enabled_stream = crate::reasoning::effective_thinking_enabled(
         engine.enable_thinking(),
         &[engine.model_name(), req.model.as_str()],
         req.reasoning.as_ref(),
     );
 
-    // Exclude tools from streaming prompt — tool_calls deltas are unsupported.
-    let mut prompt_tokens = engine
-        .prepare_chat_prompt_with_thinking(&messages, None, thinking_enabled_stream)
-        .map_err(ServerError::Engine)?;
-
-    // Preprocess images for VLM
-    let pixel_values = if !images.is_empty() && engine.is_vlm() {
-        engine.replace_image_tokens(&mut prompt_tokens);
+    // Preprocess images and prepare multimodal prompt
+    let (prompt_tokens, images_data) = if !images.is_empty() && engine.is_vlm() {
         let image_size = engine.vlm_image_size().unwrap_or(384);
         #[allow(clippy::as_conversions, clippy::cast_sign_loss)]
         let size = image_size as u32;
-        let first_image = images
-            .into_iter()
-            .next()
-            .ok_or_else(|| ServerError::BadRequest("Image data is empty".to_owned()))?;
-        let pv = higgs_models::siglip::preprocess_image(&first_image, size)
-            .map_err(|e| ServerError::InternalError(format!("Image preprocessing failed: {e}")))?;
-        Some(pv)
+        let mut processed_images = Vec::with_capacity(images.len());
+        for img_bytes in &images {
+            let pv = higgs_models::siglip::preprocess_image(img_bytes, size).map_err(|e| {
+                ServerError::InternalError(format!("Image preprocessing failed: {e}"))
+            })?;
+            processed_images.push(higgs_models::ProcessedImage {
+                pixel_values: pv,
+                grid_thw: None,
+            });
+        }
+        engine
+            .prepare_multimodal_prompt(&messages, &processed_images, None, thinking_enabled_stream)
+            .map_err(ServerError::Engine)?
     } else {
-        None
+        let tokens = engine
+            .prepare_chat_prompt_with_thinking(&messages, None, thinking_enabled_stream)
+            .map_err(ServerError::Engine)?;
+        (tokens, None)
     };
 
     let constraint = build_constraint(req.response_format.as_ref(), &engine)?;
@@ -514,7 +509,7 @@ fn chat_completions_stream(
             &tx,
             thinking_enabled_stream,
             constraint,
-            pixel_values,
+            images_data,
         );
         if let Err(e) = result {
             tracing::error!(error = %e, "Generation error during streaming");
@@ -656,6 +651,7 @@ fn convert_messages(
                     .filter_map(|tc| serde_json::to_value(tc).ok())
                     .collect()
             });
+            let num_images = m.content.as_ref().map_or(0, |c| c.image_urls().len());
             let content = m
                 .content
                 .as_ref()
@@ -664,6 +660,7 @@ fn convert_messages(
                 role: m.role.clone(),
                 content,
                 tool_calls: tool_calls_json,
+                num_images,
             }
         })
         .collect()
@@ -693,35 +690,6 @@ fn extract_images(messages: &[ChatCompletionMessage]) -> Vec<Vec<u8>> {
         }
     }
     images
-}
-
-/// Build text content with `<image>` placeholders injected for each image.
-/// For VLMs, each image in a message gets a `<image>\n` prefix before the text.
-fn inject_image_placeholders(messages: &[ChatCompletionMessage]) -> Vec<ChatCompletionMessage> {
-    messages
-        .iter()
-        .map(|m| {
-            let Some(content) = &m.content else {
-                return m.clone();
-            };
-            if !content.has_images() {
-                return m.clone();
-            }
-
-            let image_count = content.image_urls().len();
-            let text = content.text();
-            let prefix = "<image>\n".repeat(image_count);
-            let combined = format!("{prefix}{text}");
-
-            ChatCompletionMessage {
-                role: m.role.clone(),
-                content: Some(MessageContent::Text(combined)),
-                reasoning_content: m.reasoning_content.clone(),
-                tool_calls: m.tool_calls.clone(),
-                tool_call_id: m.tool_call_id.clone(),
-            }
-        })
-        .collect()
 }
 
 fn build_sampling_params(req: &ChatCompletionRequest) -> SamplingParams {

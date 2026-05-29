@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use higgs_models::{
-    AnyCache, AnyModel, LogprobArrays, SamplingParams, apply_penalties, sample,
+    AnyCache, AnyModel, LogprobArrays, ProcessedImage, SamplingParams, apply_penalties, sample,
     turboquant::KvCacheConfig,
 };
 use mlx_rs::{
@@ -219,7 +219,7 @@ struct PreparedGeneration<'a> {
     cache: AnyCache,
     prompt_array: Array,
     prompt_len: u32,
-    pixel_values: Option<Array>,
+    images: Vec<higgs_models::ProcessedImage>,
 }
 
 impl SimpleEngine {
@@ -296,6 +296,7 @@ impl SimpleEngine {
                     role: "user".to_owned(),
                     content: "x".to_owned(),
                     tool_calls: None,
+                    num_images: 0,
                 }];
                 let with_gen = tmpl
                     .apply_with_thinking(&test_msg, None, true, enable_thinking)
@@ -443,6 +444,101 @@ impl SimpleEngine {
         self.prepare_chat_prompt_with_thinking(messages, tools, self.enable_thinking)
     }
 
+    /// Prepare a multimodal prompt: inject vision tokens into message contents,
+    /// apply chat template, tokenize, and return prompt tokens with image data.
+    pub fn prepare_multimodal_prompt(
+        &self,
+        messages: &[ChatMessage],
+        images: &[higgs_models::ProcessedImage],
+        tools: Option<&[serde_json::Value]>,
+        enable_thinking: bool,
+    ) -> Result<(Vec<u32>, Option<Vec<higgs_models::ProcessedImage>>), EngineError> {
+        let renderer = self.template.as_ref().ok_or_else(|| {
+            EngineError::Template(
+                "This model has no chat template; use /v1/completions instead".to_owned(),
+            )
+        })?;
+
+        let model = self
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // Build message copies with vision tokens injected into content
+        let mut image_idx = 0usize;
+        let processed_messages: Vec<ChatMessage> = messages
+            .iter()
+            .map(|m| {
+                let mut content = m.content.clone();
+                if m.num_images > 0 && model.is_vlm() {
+                    match model.spatial_merge_size() {
+                        Some(merge_size) => {
+                            // Qwen3-VL: insert <|vision_start|> + N×<|image_pad|> + <|vision_end|>
+                            let mut vision_parts = String::new();
+                            for _ in 0..m.num_images {
+                                if let Some(img) = images.get(image_idx) {
+                                    let grid = img.grid_thw.as_ref().map(|g| {
+                                        let slice = g.as_slice::<i32>();
+                                        (slice[0], slice[1], slice[2])
+                                    });
+                                    let num_tokens = grid.map_or(1, |(t, h, w)| {
+                                        (t * h * w / (merge_size * merge_size)).max(1)
+                                    });
+                                    vision_parts.push_str("<|vision_start|>");
+                                    for _ in 0..num_tokens {
+                                        vision_parts.push_str("<|image_pad|>");
+                                    }
+                                    vision_parts.push_str("<|vision_end|>");
+                                    image_idx += 1;
+                                }
+                            }
+                            content = format!("{}\n{}", vision_parts, content);
+                        }
+                        None => {
+                            // LlavaQwen2: insert <image> placeholders
+                            let placeholders = "<image>\n".repeat(m.num_images);
+                            content = format!("{}{}", placeholders, content);
+                            image_idx += m.num_images;
+                        }
+                    }
+                }
+                ChatMessage {
+                    role: m.role.clone(),
+                    content,
+                    tool_calls: m.tool_calls.clone(),
+                    num_images: m.num_images,
+                }
+            })
+            .collect();
+
+        let prompt =
+            renderer.apply_with_thinking(&processed_messages, tools, true, enable_thinking)?;
+        let encoding = self
+            .tokenizer
+            .encode(prompt.as_str(), false)
+            .map_err(|e| EngineError::Tokenization(e.to_string()))?;
+        let mut prompt_tokens = encoding.get_ids().to_vec();
+
+        // Replace image placeholder tokens with the model-specific image token index
+        if let Some(image_token_id) = model.image_token_index() {
+            let image_token_u32 = image_token_id as u32;
+            for token in prompt_tokens.iter_mut() {
+                // For Qwen3 the tokenizer already emits the correct image_token_id
+                // for <|image_pad|>, but for LlavaQwen2 we need to replace <image>
+                if *token != image_token_u32 {
+                    if let Some(vocab_image_id) = self.tokenizer.token_to_id("<image>") {
+                        if *token == vocab_image_id {
+                            *token = image_token_u32;
+                        }
+                    }
+                }
+            }
+        }
+
+        let images_out = if images.is_empty() { None } else { Some(images.to_vec()) };
+        Ok((prompt_tokens, images_out))
+    }
+
     /// Whether the loaded model is a vision-language model.
     pub fn is_vlm(&self) -> bool {
         let model = self
@@ -489,10 +585,10 @@ impl SimpleEngine {
     fn prepare_generation(
         &self,
         prompt_tokens: &[u32],
-        pixel_values: Option<Array>,
+        images: Option<Vec<higgs_models::ProcessedImage>>,
     ) -> Result<PreparedGeneration<'_>, EngineError> {
         let prompt_len = Self::prompt_len(prompt_tokens)?;
-        let has_images = pixel_values.is_some();
+        let has_images = images.as_ref().map_or(false, |v| !v.is_empty());
 
         // Skip prefix caching for multimodal requests: different images
         // produce different KV states even with identical token sequences.
@@ -549,7 +645,7 @@ impl SimpleEngine {
             cache,
             prompt_array,
             prompt_len,
-            pixel_values,
+            images: images.unwrap_or_default(),
         })
     }
 
@@ -564,11 +660,11 @@ impl SimpleEngine {
         logprob_top_n: Option<u32>,
         constraint: Option<&crate::constrained::ConstrainedGenerator>,
     ) -> Result<(Array, Option<LogprobArrays>), EngineError> {
-        let logits = if let Some(ref pixel_values) = prepared.pixel_values {
+        let logits = if !prepared.images.is_empty() {
             // Multimodal path: full forward (VLMs need all tokens for vision)
             prepared
                 .model
-                .forward_multimodal(&prepared.prompt_array, pixel_values, &mut prepared.cache)
+                .forward_multimodal(&prepared.prompt_array, &prepared.images, &mut prepared.cache)
                 .map_err(EngineError::Mlx)?
         } else {
             // Text-only prefill: use chunked prefill for long sequences to bound
@@ -623,7 +719,7 @@ impl SimpleEngine {
         }
 
         // Skip prefix cache for multimodal (image-specific KV states)
-        if prepared.pixel_values.is_none() {
+        if prepared.images.is_empty() {
             let mut pc = self
                 .prefix_cache
                 .lock()
@@ -858,7 +954,7 @@ impl SimpleEngine {
         logprobs: bool,
         top_logprobs: Option<u32>,
         constraint: Option<crate::constrained::ConstrainedGenerator>,
-        pixel_values: Option<Array>,
+        images: Option<Vec<ProcessedImage>>,
     ) -> Result<GenerationOutput, EngineError> {
         self.generate_with_thinking(
             prompt_tokens,
@@ -869,7 +965,7 @@ impl SimpleEngine {
             top_logprobs,
             self.enable_thinking,
             constraint,
-            pixel_values,
+            images,
         )
     }
 
@@ -884,7 +980,7 @@ impl SimpleEngine {
         top_logprobs: Option<u32>,
         enable_thinking: bool,
         constraint: Option<crate::constrained::ConstrainedGenerator>,
-        pixel_values: Option<Array>,
+        images: Option<Vec<ProcessedImage>>,
     ) -> Result<GenerationOutput, EngineError> {
         if prompt_tokens.is_empty() {
             return Err(EngineError::Generation("Prompt is empty".to_owned()));
@@ -911,7 +1007,7 @@ impl SimpleEngine {
                 top_logprobs,
                 enable_thinking,
                 constraint,
-                pixel_values,
+                images,
             )
         })
     }
@@ -931,11 +1027,11 @@ impl SimpleEngine {
         top_logprobs: Option<u32>,
         enable_thinking: bool,
         mut constraint: Option<crate::constrained::ConstrainedGenerator>,
-        pixel_values: Option<Array>,
+        images: Option<Vec<ProcessedImage>>,
     ) -> Result<GenerationOutput, EngineError> {
         let logprob_top_n = logprobs.then(|| top_logprobs.unwrap_or(0));
 
-        let mut prepared = self.prepare_generation(prompt_tokens, pixel_values)?;
+        let mut prepared = self.prepare_generation(prompt_tokens, images)?;
         let prompt_len = prepared.prompt_len;
         let (current_token, first_logprob_data) = self.run_prefill(
             prompt_tokens,
@@ -1043,7 +1139,7 @@ impl SimpleEngine {
         let mut step_count: u32 = 0;
 
         // Thinking budget: force </think> after N tokens if model hasn't closed it.
-        const THINKING_BUDGET: u32 = 256;
+        const THINKING_BUDGET: u32 = 1024;
         let think_close_token = if enable_thinking {
             self.think_close_token
         } else {
@@ -1295,7 +1391,7 @@ impl SimpleEngine {
         let t_start = std::time::Instant::now();
 
         // Thinking budget: force </think> after N tokens if model hasn't closed it.
-        const THINKING_BUDGET: u32 = 256;
+        const THINKING_BUDGET: u32 = 1024;
         let think_close_token = if enable_thinking {
             self.think_close_token
         } else {
@@ -1515,7 +1611,7 @@ impl SimpleEngine {
         let mut total_cycles: u32 = 0;
         let t_start = std::time::Instant::now();
 
-        const THINKING_BUDGET: u32 = 256;
+        const THINKING_BUDGET: u32 = 1024;
         let think_close_token = if enable_thinking {
             self.think_close_token
         } else {
@@ -1622,6 +1718,7 @@ impl SimpleEngine {
                                         prompt_tokens: prompt_len,
                                         completion_tokens: completion_len,
                                         token_logprob: None,
+                                        current_token: 0,
                                     })
                                     .is_err()
                                 {
@@ -1699,6 +1796,7 @@ impl SimpleEngine {
                         prompt_tokens: prompt_len,
                         completion_tokens: completion_len,
                         token_logprob: None,
+                        current_token: 0,
                     })
                     .is_err()
                 {
@@ -1733,7 +1831,7 @@ impl SimpleEngine {
         top_logprobs: Option<u32>,
         sender: &tokio::sync::mpsc::Sender<StreamingOutput>,
         constraint: Option<crate::constrained::ConstrainedGenerator>,
-        pixel_values: Option<Array>,
+        images: Option<Vec<ProcessedImage>>,
     ) -> Result<(), EngineError> {
         self.generate_streaming_with_thinking(
             prompt_tokens,
@@ -1745,7 +1843,7 @@ impl SimpleEngine {
             sender,
             self.enable_thinking,
             constraint,
-            pixel_values,
+            images,
         )
     }
 
@@ -1761,7 +1859,7 @@ impl SimpleEngine {
         sender: &tokio::sync::mpsc::Sender<StreamingOutput>,
         enable_thinking: bool,
         constraint: Option<crate::constrained::ConstrainedGenerator>,
-        pixel_values: Option<Array>,
+        images: Option<Vec<ProcessedImage>>,
     ) -> Result<(), EngineError> {
         if prompt_tokens.is_empty() {
             return Err(EngineError::Generation("Prompt is empty".to_owned()));
@@ -1775,6 +1873,7 @@ impl SimpleEngine {
                 prompt_tokens: prompt_len,
                 completion_tokens: 0,
                 token_logprob: None,
+                current_token: 0,
             });
             return Ok(());
         }
@@ -1790,7 +1889,7 @@ impl SimpleEngine {
                 sender,
                 enable_thinking,
                 constraint,
-                pixel_values,
+                images,
             )
         })
     }
@@ -1811,11 +1910,11 @@ impl SimpleEngine {
         sender: &tokio::sync::mpsc::Sender<StreamingOutput>,
         enable_thinking: bool,
         mut constraint: Option<crate::constrained::ConstrainedGenerator>,
-        pixel_values: Option<Array>,
+        images: Option<Vec<ProcessedImage>>,
     ) -> Result<(), EngineError> {
         let logprob_top_n = logprobs.then(|| top_logprobs.unwrap_or(0));
 
-        let mut prepared = self.prepare_generation(prompt_tokens, pixel_values)?;
+        let mut prepared = self.prepare_generation(prompt_tokens, images)?;
         let prompt_len = prepared.prompt_len;
         let (current_token, first_logprob_data) = self.run_prefill(
             prompt_tokens,
@@ -1865,6 +1964,7 @@ impl SimpleEngine {
                 prompt_tokens: prompt_len,
                 completion_tokens: 1,
                 token_logprob: first_logprob,
+                current_token: first_token_id,
             })
             .is_err()
         {
@@ -1898,7 +1998,7 @@ impl SimpleEngine {
         }
 
         // Thinking budget (streaming): force </think> after N tokens.
-        const THINKING_BUDGET: u32 = 256;
+        const THINKING_BUDGET: u32 = 1024;
         let think_close_token = if enable_thinking {
             self.think_close_token
         } else {
@@ -2036,6 +2136,7 @@ impl SimpleEngine {
                     prompt_tokens: prompt_len,
                     completion_tokens: completion_len,
                     token_logprob,
+                    current_token: token_id,
                 })
                 .is_err()
             {

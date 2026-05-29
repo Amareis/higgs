@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use higgs_models::{
-    AnyCache, AnyModel, LogprobArrays, SamplingParams, apply_penalties, sample,
+    AnyCache, AnyModel, LogprobArrays, ProcessedImage, SamplingParams, apply_penalties, sample,
     turboquant::KvCacheConfig,
 };
 use mlx_rs::{
@@ -187,7 +187,7 @@ impl BatchEngine {
         logprobs: bool,
         top_logprobs: Option<u32>,
         constraint: Option<crate::constrained::ConstrainedGenerator>,
-        pixel_values: Option<mlx_rs::Array>,
+        images: Option<Vec<ProcessedImage>>,
     ) -> Result<GenerationOutput, EngineError> {
         self.generate_with_thinking(
             prompt_tokens,
@@ -198,7 +198,7 @@ impl BatchEngine {
             top_logprobs,
             false,
             constraint,
-            pixel_values,
+            images,
         )
     }
 
@@ -213,9 +213,9 @@ impl BatchEngine {
         top_logprobs: Option<u32>,
         _enable_thinking: bool,
         constraint: Option<crate::constrained::ConstrainedGenerator>,
-        pixel_values: Option<mlx_rs::Array>,
+        images: Option<Vec<ProcessedImage>>,
     ) -> Result<GenerationOutput, EngineError> {
-        if pixel_values.is_some() {
+        if images.is_some() {
             return Err(EngineError::Generation(
                 "Batch engine does not support multimodal (image) inputs".to_owned(),
             ));
@@ -295,7 +295,7 @@ impl BatchEngine {
         top_logprobs: Option<u32>,
         sender: &tokio::sync::mpsc::Sender<StreamingOutput>,
         constraint: Option<crate::constrained::ConstrainedGenerator>,
-        pixel_values: Option<mlx_rs::Array>,
+        images: Option<Vec<ProcessedImage>>,
     ) -> Result<(), EngineError> {
         self.generate_streaming_with_thinking(
             prompt_tokens,
@@ -307,7 +307,7 @@ impl BatchEngine {
             sender,
             false,
             constraint,
-            pixel_values,
+            images,
         )
     }
 
@@ -323,9 +323,9 @@ impl BatchEngine {
         sender: &tokio::sync::mpsc::Sender<StreamingOutput>,
         _enable_thinking: bool,
         constraint: Option<crate::constrained::ConstrainedGenerator>,
-        pixel_values: Option<mlx_rs::Array>,
+        images: Option<Vec<ProcessedImage>>,
     ) -> Result<(), EngineError> {
-        if pixel_values.is_some() {
+        if images.is_some() {
             return Err(EngineError::Generation(
                 "Batch engine does not support multimodal (image) inputs".to_owned(),
             ));
@@ -347,6 +347,7 @@ impl BatchEngine {
                 prompt_tokens: prompt_len,
                 completion_tokens: 0,
                 token_logprob: None,
+                current_token: 0,
             });
             return Ok(());
         }
@@ -463,6 +464,7 @@ fn worker_loop(
                         prompt_tokens: ar.prompt_len,
                         completion_tokens: 0,
                         token_logprob: None,
+                        current_token: 0,
                     });
                     finished_indices.push(i);
                 }
@@ -516,6 +518,7 @@ fn run_pipelined_decode_round(
                             prompt_tokens: ar.prompt_len,
                             completion_tokens: 0,
                             token_logprob: None,
+                            current_token: 0,
                         });
                         finished_indices.push(i);
                         graphs.push(None);
@@ -531,6 +534,7 @@ fn run_pipelined_decode_round(
                     prompt_tokens: ar.prompt_len,
                     completion_tokens: 0,
                     token_logprob: None,
+                    current_token: 0,
                 });
                 finished_indices.push(i);
                 graphs.push(None);
@@ -741,6 +745,7 @@ fn prefill_request(
                 prompt_tokens: prompt_len,
                 completion_tokens: 1,
                 token_logprob: first_token_logprob,
+                current_token: 0,
             });
             return Ok(None);
         }
@@ -756,6 +761,7 @@ fn prefill_request(
                 prompt_tokens: prompt_len,
                 completion_tokens: 1,
                 token_logprob: first_token_logprob,
+                current_token: 0,
             })
             .is_err()
         {
@@ -901,6 +907,7 @@ fn materialize_decode_step(
             prompt_tokens: ar.prompt_len,
             completion_tokens: completion_len,
             token_logprob,
+            current_token: 0,
         })
         .is_err();
 

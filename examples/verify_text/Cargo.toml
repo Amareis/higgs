@@ -1,0 +1,9 @@
+[package]
+name = "verify_text"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+higgs-engine = { path = "../../crates/higgs-engine" }
+higgs-models = { path = "../../crates/higgs-models" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }

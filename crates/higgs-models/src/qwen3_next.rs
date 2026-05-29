@@ -3015,6 +3015,10 @@ pub struct Qwen3NextCausalLM {
     lm_head: Option<QLinear>,
     #[param]
     mtp: Option<MtpHead>,
+    #[param]
+    pub vision: Option<crate::qwen3_vl_vision::Qwen3VisionModel>,
+    pub image_token_index: i32,
+    pub image_size: i32,
 }
 
 // Manual RoPE implementation for arbitrary positions
@@ -3139,7 +3143,14 @@ impl Qwen3NextCausalLM {
             model,
             lm_head,
             mtp,
+            vision: None,
+            image_token_index: -1,
+            image_size: 224,
         })
+    }
+
+    pub fn image_size(&self) -> Option<i32> {
+        self.vision.as_ref().map(|_| self.image_size)
     }
 
     /// Create the per-layer cache vector.
@@ -3197,10 +3208,14 @@ impl Qwen3NextCausalLM {
     fn forward_raw_hidden(
         &mut self,
         inputs: &Array,
-        _mask: Option<&Array>,
+        mask: Option<&Array>,
         kv_cache: &mut Vec<Option<LayerCache>>,
     ) -> Result<Array, Exception> {
-        let mut h = self.model.embed_tokens.forward(inputs)?;
+        let mut h = if let Some(inputs_embeds) = mask {
+            inputs_embeds.clone()
+        } else {
+            self.model.embed_tokens.forward(inputs)?
+        };
 
         if kv_cache.is_empty() {
             *kv_cache = self.make_cache();
@@ -3509,6 +3524,65 @@ impl Qwen3NextCausalLM {
             i32::try_from(token_id).map_err(|_| Exception::custom("token_id exceeds i32 range"))?;
         let ids = Array::from_slice(&[token_id_i32], &[1, 1]);
         self.model.embed_tokens.forward(&ids)
+    }
+
+    /// Look up embeddings for a batch of token ids.
+    pub fn embed_tokens_forward(&self, input_ids: &Array) -> Result<Array, Exception> {
+        self.model.embed_tokens.forward(input_ids)
+    }
+
+    /// Forward pass with pre-computed input embeddings.
+    ///
+    /// Equivalent to `forward` but skips the embedding lookup.
+    /// Returns logits for the **last position only**.
+    pub fn forward_from_embeddings(
+        &mut self,
+        inputs_embeds: &Array,
+        kv_cache: &mut Vec<Option<LayerCache>>,
+    ) -> Result<Array, Exception> {
+        let dummy = Array::from_slice(&[0_i32], &[1, 1]);
+        self.forward(&dummy, Some(inputs_embeds), kv_cache)
+    }
+
+    /// Multimodal forward pass: process image through vision tower, merge
+    /// features into text embeddings, then run language model.
+    pub fn forward_multimodal(
+        &mut self,
+        input_ids: &Array,
+        images: &[crate::ProcessedImage],
+        cache: &mut Vec<Option<LayerCache>>,
+    ) -> Result<Array, Exception> {
+        if images.is_empty() {
+            return Err(Exception::custom("no images provided"));
+        }
+        let pixel_values = if images.len() == 1 {
+            images[0].pixel_values.clone()
+        } else {
+            let arrays: Vec<&mlx_rs::Array> = images.iter().map(|i| &i.pixel_values).collect();
+            mlx_rs::ops::concatenate_axis(&arrays, 0)?
+        };
+        let grid_thw = if images.len() == 1 {
+            images[0].grid_thw.clone().ok_or_else(|| Exception::custom("grid_thw required"))?
+        } else {
+            let arrays: Vec<&mlx_rs::Array> = images.iter().filter_map(|i| i.grid_thw.as_ref()).collect();
+            if arrays.len() != images.len() {
+                return Err(Exception::custom("grid_thw required for all images"));
+            }
+            mlx_rs::ops::concatenate_axis(&arrays, 0)?
+        };
+        let vision = self
+            .vision
+            .as_mut()
+            .ok_or_else(|| Exception::custom("vision tower not loaded"))?;
+        let vision_features = vision.forward(&pixel_values, &grid_thw)?;
+        let inputs_embeds = self.embed_tokens_forward(input_ids)?;
+        let merged = crate::qwen3_vl_vision::merge_input_ids_with_image_features(
+            &vision_features,
+            &inputs_embeds,
+            input_ids,
+            self.image_token_index,
+        )?;
+        self.forward_from_embeddings(&merged, cache)
     }
 
     /// Run the MTP head to produce draft logits for position t+2.
@@ -3947,7 +4021,8 @@ pub fn load_qwen3_5_model<P: AsRef<Path>>(model_dir: P) -> Result<Qwen3NextCausa
         head_v_dim: args.linear_value_head_dim,
     };
     gdn_dims.validate()?;
-    let model = load_qwen3_5_model_with_gdn_fallback(model_path, args, &gdn_dims)?;
+    let mut model = load_qwen3_5_model_with_gdn_fallback(model_path, args, &gdn_dims)?;
+    try_attach_vision(&mut model, model_path)?;
 
     tracing::info!("Qwen3.5 dense model loaded successfully");
     Ok(model)
@@ -3989,7 +4064,8 @@ pub fn load_qwen3_5_moe_model<P: AsRef<Path>>(
     // var or mixed-bit BA detection in load_qwen3_5_moe_text_config_args), and
     // falls back to separate projections at runtime if fusion finds a
     // shape-incompatible BA pair.
-    let model = load_qwen3_5_model_with_gdn_fallback(model_path, args, &gdn_dims)?;
+    let mut model = load_qwen3_5_model_with_gdn_fallback(model_path, args, &gdn_dims)?;
+    try_attach_vision(&mut model, model_path)?;
 
     tracing::info!("Qwen3.5-MoE model loaded successfully");
     Ok(model)
@@ -4036,6 +4112,52 @@ fn load_qwen3_5_model_with_gdn_fallback(
         }
         Err(err) => Err(err),
     }
+}
+
+/// Try to attach a vision tower to a Qwen3Next model when `vision_config` is present.
+fn try_attach_vision(model: &mut Qwen3NextCausalLM, model_path: &Path) -> Result<(), ModelError> {
+    use std::collections::HashMap;
+
+    let config_path = model_path.join("config.json");
+    let file = std::fs::File::open(&config_path)?;
+    let config: serde_json::Value = serde_json::from_reader(file)?;
+
+    let Some(vision_config_val) = config.get("vision_config") else {
+        return Ok(());
+    };
+
+    let vision_config: crate::qwen3_vl_vision::Qwen3VisionConfig =
+        serde_json::from_value(vision_config_val.clone())
+            .map_err(|e| ModelError::UnsupportedModel(format!("invalid vision_config: {e}")))?;
+
+    let mut vision_model = crate::qwen3_vl_vision::Qwen3VisionModel::new(&vision_config)
+        .map_err(|e| ModelError::UnsupportedModel(format!("vision model init: {e}")))?;
+
+    // Load vision weights from safetensors (prefix: vision_tower)
+    let safetensors_files = crate::collect_safetensors_files(model_path)?;
+    let mut vision_weights: HashMap<String, Array> = HashMap::new();
+    for file_path in &safetensors_files {
+        let loaded = Array::load_safetensors(file_path)
+            .map_err(|e| ModelError::Io(std::io::Error::other(e.to_string())))?;
+        for (key, value) in loaded {
+            if key.starts_with("vision_tower.") {
+                vision_weights.insert(key, value);
+            }
+        }
+    }
+
+    crate::qwen3_vl_vision::load_qwen3_vision_weights(&mut vision_model, &vision_weights)?;
+
+    model.vision = Some(vision_model);
+    model.image_token_index = config
+        .get("image_token_id")
+        .and_then(|v| v.as_i64())
+        .map_or(-1, |v| v as i32);
+    // Qwen3-VL uses dynamic image sizes; default to 448 for preprocessing hints.
+    model.image_size = 448;
+
+    tracing::info!("Vision tower attached to Qwen3Next model");
+    Ok(())
 }
 
 /// Returns true when the supplied error is the mixed-bit BA fusion error raised
@@ -5911,10 +6033,6 @@ mod tests {
         }
         let build_ms = total_build_ns as f64 / n as f64 / 1_000_000.0;
         let eval_ms = total_eval_ns as f64 / n as f64 / 1_000_000.0;
-        eprintln!(
-            "48 layers * 3 gather_qmm + SwiGLU: build={build_ms:.2}ms eval={eval_ms:.2}ms total={:.2}ms",
-            build_ms + eval_ms
-        );
 
         // Also test with mlx-rs ops::add chain (no FFI gather_qmm)
         let n3 = 50;
@@ -5931,7 +6049,6 @@ mod tests {
             total_simple_ns += t0.elapsed().as_nanos();
         }
         let simple_ms = total_simple_ns as f64 / n3 as f64 / 1_000_000.0;
-        eprintln!("240 chained adds (single eval): {simple_ms:.2}ms");
 
         // Test with the shared gather_qmm wrapper
         let n4 = 50;
@@ -5958,10 +6075,6 @@ mod tests {
         }
         let builtin_build = total_builtin_build as f64 / n4 as f64 / 1_000_000.0;
         let builtin_eval = total_builtin_eval as f64 / n4 as f64 / 1_000_000.0;
-        eprintln!(
-            "48 layers mlx-rs gather_qmm: build={builtin_build:.2}ms eval={builtin_eval:.2}ms total={:.2}ms",
-            builtin_build + builtin_eval
-        );
 
         // Test with quantized_matmul (not gather) - 144 chained calls
         let qm_w = Array::zeros::<u32>(&[d, d * 4 / 32]).unwrap();
@@ -5996,10 +6109,6 @@ mod tests {
         }
         let qm_build = total_qm_build as f64 / n5 as f64 / 1_000_000.0;
         let qm_eval = total_qm_eval as f64 / n5 as f64 / 1_000_000.0;
-        eprintln!(
-            "144 chained quantized_matmul: build={qm_build:.2}ms eval={qm_eval:.2}ms total={:.2}ms",
-            qm_build + qm_eval
-        );
 
         // Benchmark: single layer, per-call eval
         let n2 = 200;
@@ -6016,7 +6125,6 @@ mod tests {
             mlx_rs::transforms::eval([&y]).unwrap();
         }
         let per_layer_ms = start2.elapsed().as_millis() as f64 / n2 as f64;
-        eprintln!("1 layer * 3 gather_qmm + SwiGLU (per-call eval): {per_layer_ms:.2} ms");
 
         // Test eval overhead: 1000 chained adds (Python: build=0.23ms eval=1.87ms)
         let n_ops = 1000;
@@ -6047,15 +6155,6 @@ mod tests {
         }
         let add_build = total_add_build as f64 / n6 as f64 / 1_000_000.0;
         let add_eval = total_add_eval as f64 / n6 as f64 / 1_000_000.0;
-        eprintln!(
-            "{n_ops} chained adds: build={add_build:.2}ms eval={add_eval:.2}ms total={:.2}ms",
-            add_build + add_eval
-        );
-        eprintln!(
-            "Per op: build={:.1}us eval={:.1}us",
-            add_build * 1000.0 / n_ops as f64,
-            add_eval * 1000.0 / n_ops as f64
-        );
 
         // Test with task-local default stream
         let stream = mlx_rs::Stream::new();
@@ -6087,10 +6186,6 @@ mod tests {
                 }
                 let b = total_b as f64 / n7 as f64 / 1_000_000.0;
                 let e = total_e as f64 / n7 as f64 / 1_000_000.0;
-                eprintln!(
-                    "48 layers gather_qmm (with task-local stream): build={b:.2}ms eval={e:.2}ms total={:.2}ms",
-                    b + e
-                );
             });
         };
         gather_with_stream();
@@ -6136,10 +6231,6 @@ mod tests {
         }
         let build = total_build as f64 / n as f64 / 1e6;
         let eval = total_eval as f64 / n as f64 / 1e6;
-        eprintln!(
-            "Rust 200 qmm: build={build:.2}ms eval={eval:.2}ms total={:.2}ms",
-            build + eval
-        );
 
         // 200 chained adds
         for _ in 0..10 {
@@ -6165,10 +6256,6 @@ mod tests {
         }
         let build = total_build as f64 / n as f64 / 1e6;
         let eval = total_eval as f64 / n as f64 / 1e6;
-        eprintln!(
-            "Rust 200 add: build={build:.2}ms eval={eval:.2}ms total={:.2}ms",
-            build + eval
-        );
     }
 
     /// Simulate 48-layer forward pass with per-layer weights.
@@ -6282,17 +6369,8 @@ mod tests {
             }
             res
         };
-        eprintln!(
-            "Active memory after weight eval: {:.2} GB",
-            active_mem as f64 / 1e9
-        );
 
         // Print one switch weight shape to verify
-        eprintln!(
-            "sw_gate[0] shape: {:?} dtype: {:?}",
-            layers[0].sw_gate.0.shape(),
-            layers[0].sw_gate.0.dtype()
-        );
 
         let x = ops::ones_dtype(&[1, 1, d], Dtype::Float16).unwrap();
         mlx_rs::transforms::eval([&x]).unwrap();
@@ -6484,10 +6562,6 @@ mod tests {
                 total_eval += t0.elapsed().as_nanos();
             }
             let eval = total_eval as f64 / n as f64 / 1e6;
-            eprintln!(
-                "Inline {n_layers} layers: eval={eval:.2}ms per_layer={:.2}ms",
-                eval / n_layers as f64
-            );
         }
     }
 
@@ -6500,7 +6574,6 @@ mod tests {
         let shard = format!("{}/model-00001-of-00009.safetensors", model_dir);
         let path = std::path::Path::new(&shard);
         if !path.exists() {
-            eprintln!("Skipping: model not found");
             return;
         }
 
@@ -6518,22 +6591,12 @@ mod tests {
         }
         let sw_key = sw_key.expect("No switch_mlp weight found in shard");
         let w_loaded = &loaded[&sw_key];
-        eprintln!(
-            "Loaded weight '{sw_key}': shape={:?} dtype={:?}",
-            w_loaded.shape(),
-            w_loaded.dtype()
-        );
 
         // Find corresponding scales and biases
         let scales_key = sw_key.replace(".weight", ".scales");
         let biases_key = sw_key.replace(".weight", ".biases");
         let s_loaded = &loaded[&scales_key];
         let b_loaded = &loaded[&biases_key];
-        eprintln!(
-            "Scales: {:?}, Biases: {:?}",
-            s_loaded.shape(),
-            b_loaded.shape()
-        );
 
         // Create random weights of the same shape/dtype
         let w_shape = w_loaded.shape().to_vec();
@@ -6603,10 +6666,6 @@ mod tests {
 
         let loaded_us = total_loaded as f64 / n as f64 / 1e3;
         let random_us = total_random as f64 / n as f64 / 1e3;
-        eprintln!(
-            "gather_qmm single layer: loaded={loaded_us:.1}us random={random_us:.1}us ratio={:.2}x",
-            loaded_us / random_us
-        );
     }
 
     /// Isolate what causes the module vs inline performance gap.
@@ -6776,10 +6835,6 @@ mod tests {
                 total += t0.elapsed().as_nanos();
             }
             let ms = total as f64 / n as f64 / 1e6;
-            eprintln!(
-                "{label}: eval={ms:.2}ms per_layer={:.2}ms",
-                ms / n_layers as f64
-            );
         };
 
         // A) Module forward + multiply-by-zero attention
@@ -12955,10 +13010,6 @@ mod tests {
             y = next_y;
         }
         let pipe_ms = t0.elapsed().as_secs_f64() * 1000.0 / n as f64;
-
-        eprintln!("Rust mlx-rs sequential:  {seq_ms:.2}ms/step");
-        eprintln!("Rust mlx-rs pipelined:   {pipe_ms:.2}ms/step");
-        eprintln!("Speedup: {:.2}x", seq_ms / pipe_ms);
     }
 
     /// Measure pure FFI graph-building overhead: no eval, just op dispatch.
@@ -12982,10 +13033,6 @@ mod tests {
             x = x.add(&b).unwrap();
         }
         let build_us = t0.elapsed().as_micros();
-        eprintln!(
-            "Rust mlx-rs: {n} adds graph-build = {build_us}us ({:.1}us/op)",
-            build_us as f64 / n as f64
-        );
 
         // Graph build + eval
         let t0 = std::time::Instant::now();
@@ -12995,10 +13042,6 @@ mod tests {
         }
         eval([&x].into_iter()).unwrap();
         let total_us = t0.elapsed().as_micros();
-        eprintln!(
-            "Rust mlx-rs: {n} adds + eval = {total_us}us ({:.1}us/op)",
-            total_us as f64 / n as f64
-        );
 
         // With task-local stream set
         let stream = Stream::new();
@@ -13009,10 +13052,6 @@ mod tests {
                 x = x.add(&b).unwrap();
             }
             let build_us = t0.elapsed().as_micros();
-            eprintln!(
-                "Rust mlx-rs (task-local stream): {n} adds graph-build = {build_us}us ({:.1}us/op)",
-                build_us as f64 / n as f64
-            );
         });
     }
 
@@ -13388,7 +13427,6 @@ mod tests {
 
         let diff = last_full.subtract(&last_chunked).unwrap().abs().unwrap();
         let max_diff: f32 = diff.max(None).unwrap().item();
-        eprintln!("max logit |diff| = {max_diff}");
         assert!(
             max_diff < 2.0,
             "chunked logits diverge from full: max |diff| = {max_diff} (expect <2.0 for 3-bit quant)"
@@ -13430,7 +13468,6 @@ mod tests {
 
         let diff = last_full.subtract(&last_chunked).unwrap().abs().unwrap();
         let max_diff: f32 = diff.max(None).unwrap().item();
-        eprintln!("uneven max logit |diff| = {max_diff}");
         assert!(
             max_diff < 2.0,
             "uneven chunks diverge: max |diff| = {max_diff} (expect <2.0 for 3-bit quant)"
@@ -13541,10 +13578,6 @@ mod tests {
         use std::time::Instant;
 
         let mut model = load_test_model();
-        eprintln!(
-            "Model: {} layers, hidden={}\n",
-            model.args.num_hidden_layers, model.args.hidden_size,
-        );
 
         let seq_lengths: Vec<i32> = std::env::var("BENCH_SEQ")
             .unwrap_or_else(|_| "512,1024,2048,5120,10240".to_string())
@@ -13638,19 +13671,11 @@ mod tests {
             format!("{home}/.cache/lm-studio/models/NexVeridian/Qwen3.5-35B-A3B-3bit")
         });
         if !std::path::Path::new(&model_path).exists() {
-            eprintln!("Model not found at {model_path}");
-            eprintln!("Set HIGGS_MODEL_PATH env var to your model directory");
             return;
         }
-
-        eprintln!("Loading model from {model_path} ...");
         let mut model = load_qwen3_5_moe_model(&model_path).unwrap();
         let n_layers = model.args.num_hidden_layers;
         let fa_interval = model.args.full_attention_interval;
-        eprintln!(
-            "Loaded: {n_layers} layers, hidden={}, fa_interval={fa_interval}",
-            model.args.hidden_size,
-        );
 
         // Warmup: prime Metal shaders + lazy dtype conversions
         {

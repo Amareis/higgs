@@ -8,9 +8,8 @@ use higgs_engine::error::EngineError;
 use higgs_engine::mlx_tuning::MlxRuntimeTuning;
 use higgs_engine::simple::SimpleEngine;
 use higgs_engine::tokenizers::Tokenizer;
-use higgs_models::SamplingParams;
 use higgs_models::turboquant::KvCacheConfig;
-use mlx_rs::Array;
+use higgs_models::{ProcessedImage, SamplingParams};
 
 use crate::config::HiggsConfig;
 use crate::metrics::MetricsStore;
@@ -151,6 +150,23 @@ impl Engine {
         }
     }
 
+    pub fn prepare_multimodal_prompt(
+        &self,
+        messages: &[ChatMessage],
+        images: &[higgs_models::ProcessedImage],
+        tools: Option<&[serde_json::Value]>,
+        enable_thinking: bool,
+    ) -> Result<(Vec<u32>, Option<Vec<higgs_models::ProcessedImage>>), EngineError> {
+        match self {
+            Self::Simple(e) => e.prepare_multimodal_prompt(messages, images, tools, enable_thinking),
+            Self::Batch(_) => Err(EngineError::Generation(
+                "Batch engine does not support multimodal".to_owned(),
+            )),
+            #[cfg(test)]
+            Self::Stub(_) => Ok((Vec::new(), None)),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn generate(
         &self,
@@ -161,7 +177,7 @@ impl Engine {
         logprobs: bool,
         top_logprobs: Option<u32>,
         constraint: Option<higgs_engine::constrained::ConstrainedGenerator>,
-        pixel_values: Option<Array>,
+        images: Option<Vec<ProcessedImage>>,
     ) -> Result<GenerationOutput, EngineError> {
         self.generate_with_thinking(
             prompt_tokens,
@@ -172,7 +188,7 @@ impl Engine {
             top_logprobs,
             self.enable_thinking(),
             constraint,
-            pixel_values,
+            images,
         )
     }
 
@@ -187,7 +203,7 @@ impl Engine {
         top_logprobs: Option<u32>,
         enable_thinking: bool,
         constraint: Option<higgs_engine::constrained::ConstrainedGenerator>,
-        pixel_values: Option<Array>,
+        images: Option<Vec<ProcessedImage>>,
     ) -> Result<GenerationOutput, EngineError> {
         match self {
             Self::Simple(e) => e.generate_with_thinking(
@@ -199,7 +215,7 @@ impl Engine {
                 top_logprobs,
                 enable_thinking,
                 constraint,
-                pixel_values,
+                images,
             ),
             Self::Batch(e) => e.generate_with_thinking(
                 prompt_tokens,
@@ -210,7 +226,7 @@ impl Engine {
                 top_logprobs,
                 enable_thinking,
                 constraint,
-                pixel_values,
+                images,
             ),
             #[cfg(test)]
             Self::Stub(_) => Err(EngineError::Generation("test stub".to_owned())),
@@ -228,7 +244,7 @@ impl Engine {
         top_logprobs: Option<u32>,
         sender: &tokio::sync::mpsc::Sender<StreamingOutput>,
         constraint: Option<higgs_engine::constrained::ConstrainedGenerator>,
-        pixel_values: Option<Array>,
+        images: Option<Vec<ProcessedImage>>,
     ) -> Result<(), EngineError> {
         self.generate_streaming_with_thinking(
             prompt_tokens,
@@ -240,7 +256,7 @@ impl Engine {
             sender,
             self.enable_thinking(),
             constraint,
-            pixel_values,
+            images,
         )
     }
 
@@ -256,7 +272,7 @@ impl Engine {
         sender: &tokio::sync::mpsc::Sender<StreamingOutput>,
         enable_thinking: bool,
         constraint: Option<higgs_engine::constrained::ConstrainedGenerator>,
-        pixel_values: Option<Array>,
+        images: Option<Vec<ProcessedImage>>,
     ) -> Result<(), EngineError> {
         match self {
             Self::Simple(e) => e.generate_streaming_with_thinking(
@@ -269,7 +285,7 @@ impl Engine {
                 sender,
                 enable_thinking,
                 constraint,
-                pixel_values,
+                images,
             ),
             Self::Batch(e) => e.generate_streaming_with_thinking(
                 prompt_tokens,
@@ -281,7 +297,7 @@ impl Engine {
                 sender,
                 enable_thinking,
                 constraint,
-                pixel_values,
+                images,
             ),
             #[cfg(test)]
             Self::Stub(_) => Err(EngineError::Generation("test stub".to_owned())),

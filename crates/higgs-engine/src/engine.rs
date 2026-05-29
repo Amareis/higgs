@@ -19,6 +19,8 @@ pub struct StreamingOutput {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub token_logprob: Option<TokenLogprobInfo>,
+    /// The token ID that produced this chunk of new text.
+    pub current_token: u32,
 }
 
 #[cfg(test)]
@@ -64,6 +66,7 @@ mod tests {
             prompt_tokens: 20,
             completion_tokens: 15,
             token_logprob: None,
+            current_token: 0,
         };
         assert!(output.finished);
         assert_eq!(output.finish_reason.as_deref(), Some("stop"));
@@ -79,6 +82,7 @@ mod tests {
             prompt_tokens: 20,
             completion_tokens: 3,
             token_logprob: None,
+            current_token: 0,
         };
         assert!(!output.finished);
         assert!(output.finish_reason.is_none());
@@ -93,6 +97,7 @@ mod tests {
             prompt_tokens: 0,
             completion_tokens: 0,
             token_logprob: None,
+            current_token: 0,
         };
         assert!(output.new_text.is_empty());
         assert_eq!(output.prompt_tokens, 0);
@@ -122,6 +127,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 2,
             token_logprob: None,
+            current_token: 0,
         };
         let cloned = output.clone();
         assert_eq!(cloned.new_text, output.new_text);
@@ -152,6 +158,7 @@ mod tests {
             prompt_tokens: 5,
             completion_tokens: 10,
             token_logprob: None,
+            current_token: 0,
         };
         let debug_str = format!("{output:?}");
         assert!(debug_str.contains("StreamingOutput"));

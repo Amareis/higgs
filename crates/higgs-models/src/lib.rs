@@ -7,6 +7,8 @@ pub mod llava_qwen2;
 pub mod phi3;
 pub mod qwen3_moe;
 pub mod qwen3_next;
+pub mod qwen3_vl_vision;
+pub mod qwen3_vl_processor;
 pub mod registry;
 pub mod siglip;
 pub mod spec_prefill;
@@ -31,6 +33,21 @@ use crate::error::ModelError;
 use crate::turboquant::KvCacheConfig;
 
 static BONSAI_IGNORED_MASK_WARNED: AtomicBool = AtomicBool::new(false);
+
+// ---------------------------------------------------------------------------
+// ImagesData -- preprocessed image tensors for multimodal models
+// ---------------------------------------------------------------------------
+
+/// Preprocessed image data ready for the vision encoder.
+///
+/// For SigLIP-based models (e.g. LlavaQwen2) only `pixel_values` is required.
+/// For Qwen3-VL `grid_thw` is also needed to compute interpolated positional
+/// embeddings.
+#[derive(Debug, Clone)]
+pub struct ProcessedImage {
+    pub pixel_values: Array,
+    pub grid_thw: Option<Array>,
+}
 
 // ---------------------------------------------------------------------------
 // SamplingParams -- configurable sampling parameters
@@ -625,22 +642,52 @@ impl AnyModel {
     }
 
     /// Whether this model is a vision-language model that supports image input.
-    pub const fn is_vlm(&self) -> bool {
+    pub fn is_vlm(&self) -> bool {
         matches!(self, Self::LlavaQwen2(_))
+            || matches!(self, Self::Qwen3Next(m) if m.vision.is_some())
     }
 
     /// The expected image size for the VLM's vision encoder, or `None` for text-only models.
-    pub const fn image_size(&self) -> Option<i32> {
+    pub fn image_size(&self) -> Option<i32> {
         match self {
             Self::LlavaQwen2(m) => Some(m.image_size()),
+            Self::Qwen3Next(m) => {
+                if m.vision.is_some() {
+                    Some(m.image_size)
+                } else {
+                    None
+                }
+            }
             Self::Transformer(_)
-            | Self::Qwen3Next(_)
             | Self::Qwen3Moe(_)
             | Self::Gemma2(_)
             | Self::Phi3(_)
             | Self::Starcoder2(_)
             | Self::DeepSeekV2(_)
             | Self::BonsaiQ1(_) => None,
+        }
+    }
+
+    /// The image token index used by this model, or `None` for text-only models.
+    pub fn image_token_index(&self) -> Option<i32> {
+        match self {
+            Self::LlavaQwen2(_) => Some(crate::llava_qwen2::IMAGE_TOKEN_INDEX),
+            Self::Qwen3Next(m) => {
+                if m.vision.is_some() {
+                    Some(m.image_token_index)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The spatial merge size for the vision encoder, or `None` for text-only models.
+    pub fn spatial_merge_size(&self) -> Option<i32> {
+        match self {
+            Self::Qwen3Next(m) => m.vision.as_ref().map(|v| v.config.spatial_merge_size),
+            _ => None,
         }
     }
 
@@ -651,12 +698,15 @@ impl AnyModel {
     pub fn forward_multimodal(
         &mut self,
         input_ids: &Array,
-        pixel_values: &Array,
+        images: &[ProcessedImage],
         cache: &mut AnyCache,
     ) -> Result<Array, Exception> {
         match (self, cache) {
             (Self::LlavaQwen2(m), AnyCache::KV(c)) => {
-                m.forward_multimodal(input_ids, pixel_values, c)
+                m.forward_multimodal(input_ids, images, c)
+            }
+            (Self::Qwen3Next(m), AnyCache::Hybrid(c)) => {
+                m.forward_multimodal(input_ids, images, c)
             }
             _ => Err(Exception::custom(
                 "Model does not support multimodal forward",

@@ -1,0 +1,10 @@
+[package]
+name = "basic_inference"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+higgs-engine = { path = "../../crates/higgs-engine" }
+higgs-models = { path = "../../crates/higgs-models" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
