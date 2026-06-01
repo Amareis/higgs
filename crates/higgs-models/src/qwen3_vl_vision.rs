@@ -103,7 +103,7 @@ impl PatchEmbed {
 
     fn forward(&mut self, hidden_states: &Array) -> Result<Array, Exception> {
         // hidden_states shape: [num_patches, C * T * H * W]
-        let flat_size =
+        let _flat_size =
             self.in_channels * self.temporal_patch_size * self.patch_size * self.patch_size;
         let num_patches = hidden_states.shape()[0];
 
@@ -176,7 +176,7 @@ pub fn merge_input_ids_with_image_features(
     let special_image_mask = input_ids.eq(&Array::from(image_token_index))?;
     let n_image_tokens = special_image_mask.sum(None)?.item::<i32>();
 
-    let special_image_mask_3d = special_image_mask.expand_dims(2)?; // [1, seq, 1]
+    let _special_image_mask_3d = special_image_mask.expand_dims(2)?; // [1, seq, 1]
     let n_image_features = image_features.shape()[0];
     if n_image_tokens != n_image_features as i32 {
         return Err(Exception::custom(format!(
@@ -229,7 +229,7 @@ fn fast_pos_embed_interpolate(
     let mut weight_list: Vec<Vec<f32>> = vec![Vec::new(); 4];
 
     for item in &grid_list {
-        let t = item[0];
+        let _t = item[0];
         let h = item[1];
         let w = item[2];
 
@@ -403,7 +403,7 @@ impl VisionAttention {
     fn forward(
         &mut self,
         x: &Array,
-        cu_seqlens: &Array,
+        _cu_seqlens: &Array,
         rotary_pos_emb: &Array,
     ) -> Result<Array, Exception> {
         let seq_len = x.shape()[0];

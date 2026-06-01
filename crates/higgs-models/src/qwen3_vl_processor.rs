@@ -2,10 +2,10 @@
 //!
 //! Ports the logic from `mlx-vlm/mlx_vlm/models/qwen3_vl/processing_qwen3_vl.py`.
 
-use image::{imageops, DynamicImage, GenericImageView};
+use crate::Exception;
+use image::{DynamicImage, imageops};
 use mlx_rs::Array;
 use mlx_rs::ops::indexing::IndexOp;
-use crate::Exception;
 use std::path::Path;
 
 /// Smart resize for Qwen3-VL images.
@@ -35,11 +35,9 @@ pub fn smart_resize_image(
 
     if h_bar * w_bar > max_pixels {
         let beta = ((height * width) as f64 / max_pixels as f64).sqrt();
-        h_bar = (factor as f64)
-            .max((height as f64 / beta / factor as f64).floor() * factor as f64)
+        h_bar = (factor as f64).max((height as f64 / beta / factor as f64).floor() * factor as f64)
             as i32;
-        w_bar = (factor as f64)
-            .max((width as f64 / beta / factor as f64).floor() * factor as f64)
+        w_bar = (factor as f64).max((width as f64 / beta / factor as f64).floor() * factor as f64)
             as i32;
     } else if h_bar * w_bar < min_pixels {
         let beta = (min_pixels as f64 / (height * width) as f64).sqrt();
@@ -81,14 +79,8 @@ pub fn process_image(
     let (orig_h, orig_w) = (img.height() as i32, img.width() as i32);
     let factor = patch_size * merge_size;
 
-    let (resized_h, resized_w) = smart_resize_image(
-        orig_h,
-        orig_w,
-        factor,
-        min_pixels,
-        max_pixels,
-    )
-    .map_err(Exception::custom)?;
+    let (resized_h, resized_w) = smart_resize_image(orig_h, orig_w, factor, min_pixels, max_pixels)
+        .map_err(Exception::custom)?;
 
     // Bicubic resize via image crate (CatmullRom ≈ PIL BICUBIC)
     let resized = img.resize_exact(
@@ -117,10 +109,8 @@ pub fn process_image(
     arr = arr.multiply(&Array::from(1.0f32 / 255.0))?;
 
     // Normalize with mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]
-    let mean = Array::from_slice(&[0.5f32, 0.5f32, 0.5f32], &[3])
-        .expand_dims_axes(&[1, 2])?;
-    let std = Array::from_slice(&[0.5f32, 0.5f32, 0.5f32], &[3])
-        .expand_dims_axes(&[1, 2])?;
+    let mean = Array::from_slice(&[0.5f32, 0.5f32, 0.5f32], &[3]).expand_dims_axes(&[1, 2])?;
+    let std = Array::from_slice(&[0.5f32, 0.5f32, 0.5f32], &[3]).expand_dims_axes(&[1, 2])?;
     arr = arr.subtract(&mean)?;
     arr = arr.divide(&std)?;
 
