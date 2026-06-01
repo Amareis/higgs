@@ -4,56 +4,6 @@ use higgs_engine::mlx_tuning::{MlxRuntimeTuning, RequestedMlxProfile};
 use higgs_engine::simple::SimpleEngine;
 use higgs_models::turboquant::KvCacheConfig;
 use higgs_models::SamplingParams;
-use mlx_rs::Array;
-
-fn load_npy_f32(path: &str) -> (Vec<f32>, Vec<i32>) {
-    let bytes = std::fs::read(path).unwrap();
-    let reader = npyz::NpyFile::new(&bytes[..]).unwrap();
-    let shape: Vec<i32> = reader.shape().iter().map(|&d| d as i32).collect();
-    let data = reader.into_vec::<f32>().unwrap();
-    (data, shape)
-}
-
-fn load_npy_i32(path: &str) -> (Vec<i32>, Vec<i32>) {
-    let bytes = std::fs::read(path).unwrap();
-    let reader = npyz::NpyFile::new(&bytes[..]).unwrap();
-    let shape: Vec<i32> = reader.shape().iter().map(|&d| d as i32).collect();
-    let data = reader.into_vec::<i32>().unwrap();
-    (data, shape)
-}
-
-#[derive(serde::Deserialize)]
-struct ProcessorConfig {
-    #[serde(rename = "image_processor")]
-    image_processor: ImageProcessorParams,
-}
-
-#[derive(serde::Deserialize)]
-struct ImageProcessorParams {
-    patch_size: i32,
-    temporal_patch_size: i32,
-    merge_size: i32,
-    min_pixels: i32,
-    max_pixels: i32,
-}
-
-fn load_processor_params(model_dir: &str) -> (i32, i32, i32, i32, i32) {
-    let path = std::path::Path::new(model_dir).join("processor_config.json");
-    if path.exists() {
-        let s = std::fs::read_to_string(&path).unwrap();
-        let cfg: ProcessorConfig = serde_json::from_str(&s).unwrap();
-        (
-            cfg.image_processor.patch_size,
-            cfg.image_processor.temporal_patch_size,
-            cfg.image_processor.merge_size,
-            cfg.image_processor.min_pixels,
-            cfg.image_processor.max_pixels,
-        )
-    } else {
-        // Fallback defaults from mlx-vlm qwen3_vl defaults
-        (16, 2, 2, 56 * 56, 14 * 14 * 4 * 1280)
-    }
-}
 
 #[derive(Parser, Debug)]
 #[command(name = "verify_vision")]
@@ -92,41 +42,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Load processor params from model's processor_config.json
-    let (patch_size, temporal_patch_size, merge_size, min_pixels, max_pixels) =
-        load_processor_params(&args.model);
+    let proc = higgs_models::load_image_processor_params(&args.model);
     println!(
         "Processor params: patch_size={}, temporal_patch_size={}, merge_size={}, min_pixels={}, max_pixels={}",
-        patch_size, temporal_patch_size, merge_size, min_pixels, max_pixels
+        proc.patch_size, proc.temporal_patch_size, proc.merge_size, proc.min_pixels, proc.max_pixels
     );
 
     // Load or preprocess images
-    let images: Vec<higgs_models::ProcessedImage> = if !args.image.is_empty() {
-        let mut out = Vec::with_capacity(args.image.len());
-        for path in &args.image {
-            println!("Processing image {:?}...", path);
-            let img = higgs_models::qwen3_vl_processor::process_image_file(
-                std::path::Path::new(path),
-                patch_size,
-                temporal_patch_size,
-                merge_size,
-                min_pixels,
-                max_pixels,
-            )
-            .map_err(|e| std::io::Error::other(format!("Image processing failed: {e}")))?;
-            out.push(img);
-        }
-        out
-    } else {
-        let (pixel_values_flat, pv_shape) =
-            load_npy_f32(&format!("{}/pixel_values.npy", args.baseline_dir));
-        let (grid_thw_flat, gt_shape) = load_npy_i32(&format!("{}/grid_thw.npy", args.baseline_dir));
-        let pixel_values = Array::from_slice(&pixel_values_flat, &pv_shape);
-        let grid_thw = Array::from_slice(&grid_thw_flat, &gt_shape);
-        vec![higgs_models::ProcessedImage {
-            pixel_values,
-            grid_thw: Some(grid_thw),
-        }]
-    };
+    let mut images: Vec<higgs_models::ProcessedImage> = Vec::with_capacity(args.image.len());
+    for path in &args.image {
+        println!("Processing image {:?}...", path);
+        let img = higgs_models::qwen3_vl_processor::process_image_file(
+            std::path::Path::new(path),
+            proc.patch_size,
+            proc.temporal_patch_size,
+            proc.merge_size,
+            proc.min_pixels,
+            proc.max_pixels,
+        )
+        .map_err(|e| std::io::Error::other(format!("Image processing failed: {e}")))?;
+        images.push(img);
+    }
 
     // Compute number of image tokens from grid_thw
     let mut total_image_tokens = 0usize;
@@ -134,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let grid = img.grid_thw.as_ref().unwrap();
         let grid_slice = grid.as_slice::<i32>();
         let num_patches = grid_slice[0] * grid_slice[1] * grid_slice[2];
-        total_image_tokens += (num_patches / (merge_size * merge_size)) as usize;
+        total_image_tokens += (num_patches / (proc.merge_size * proc.merge_size)) as usize;
     }
     println!("total_image_tokens: {}", total_image_tokens);
 
@@ -202,8 +138,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
     }
-    println!("\n\nToken IDs: {:?}", token_ids);
-    println!("Full text: {:?}", full_text);
 
     drop(handle);
     Ok(())

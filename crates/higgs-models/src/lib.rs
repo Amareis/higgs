@@ -9,6 +9,7 @@ pub mod qwen3_moe;
 pub mod qwen3_next;
 pub mod qwen3_vl_vision;
 pub mod qwen3_vl_processor;
+pub use qwen3_vl_processor::{ImageProcessorParams, load_image_processor_params};
 pub mod registry;
 pub mod siglip;
 pub mod spec_prefill;

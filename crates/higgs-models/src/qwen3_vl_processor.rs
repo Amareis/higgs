@@ -8,6 +8,56 @@ use mlx_rs::Array;
 use mlx_rs::ops::indexing::IndexOp;
 use std::path::Path;
 
+// ---------------------------------------------------------------------------
+// Processor config loading
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize, Debug, Clone)]
+struct ImageProcessorConfig {
+    #[serde(rename = "image_processor")]
+    image_processor: ImageProcessorParams,
+}
+
+/// Parameters for the Qwen3-VL image processor.
+///
+/// Loaded from `processor_config.json` in the model directory, or falling back
+/// to the default values used by mlx-vlm for Qwen3-VL.
+#[derive(serde::Deserialize, Debug, Clone, Copy)]
+pub struct ImageProcessorParams {
+    pub patch_size: i32,
+    pub temporal_patch_size: i32,
+    pub merge_size: i32,
+    pub min_pixels: i32,
+    pub max_pixels: i32,
+}
+
+impl Default for ImageProcessorParams {
+    fn default() -> Self {
+        // Fallback defaults from mlx-vlm qwen3_vl defaults
+        Self {
+            patch_size: 16,
+            temporal_patch_size: 2,
+            merge_size: 2,
+            min_pixels: 56 * 56,
+            max_pixels: 14 * 14 * 4 * 1280,
+        }
+    }
+}
+
+/// Load `ImageProcessorParams` from `{model_dir}/processor_config.json`.
+///
+/// If the file does not exist, returns [`ImageProcessorParams::default()`].
+pub fn load_image_processor_params(model_dir: &str) -> ImageProcessorParams {
+    let path = Path::new(model_dir).join("processor_config.json");
+    if path.exists() {
+        let s = std::fs::read_to_string(&path).unwrap();
+        let cfg: ImageProcessorConfig = serde_json::from_str(&s).unwrap();
+        cfg.image_processor
+    } else {
+        ImageProcessorParams::default()
+    }
+}
+
 /// Smart resize for Qwen3-VL images.
 ///
 /// Returns `(resized_height, resized_width)` where both dimensions are
