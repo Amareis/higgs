@@ -756,6 +756,38 @@ impl AnyModel {
             )),
         }
     }
+
+    /// Look up token embeddings for a batch of token ids.
+    ///
+    /// Returns embeddings of shape `[batch, seq_len, hidden_size]`.
+    pub fn embed_tokens_forward(&self, input_ids: &Array) -> Result<Array, Exception> {
+        match self {
+            Self::Qwen3Next(m) => m.embed_tokens_forward(input_ids),
+            _ => Err(Exception::custom(
+                "Model does not support embed_tokens_forward",
+            )),
+        }
+    }
+
+    /// Forward pass with pre-computed input embeddings.
+    ///
+    /// Skips the embedding lookup. Use this when continuing generation
+    /// from a cached KV state where the prefix already went through
+    /// `forward_multimodal` (e.g. vision features are already in the cache).
+    pub fn forward_embedded(
+        &mut self,
+        inputs_embeds: &Array,
+        cache: &mut AnyCache,
+    ) -> Result<Array, Exception> {
+        match (self, cache) {
+            (Self::Qwen3Next(m), AnyCache::Hybrid(c)) => {
+                m.forward_from_embeddings(inputs_embeds, c)
+            }
+            _ => Err(Exception::custom(
+                "Model does not support forward_embedded",
+            )),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

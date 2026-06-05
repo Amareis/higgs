@@ -199,6 +199,7 @@ impl BatchEngine {
             false,
             constraint,
             images,
+            None,
         )
     }
 
@@ -214,6 +215,7 @@ impl BatchEngine {
         _enable_thinking: bool,
         constraint: Option<crate::constrained::ConstrainedGenerator>,
         images: Option<Vec<ProcessedImage>>,
+        _session_id: Option<&str>,
     ) -> Result<GenerationOutput, EngineError> {
         if images.is_some() {
             return Err(EngineError::Generation(
@@ -308,6 +310,7 @@ impl BatchEngine {
             false,
             constraint,
             images,
+            None,
         )
     }
 
@@ -324,6 +327,7 @@ impl BatchEngine {
         _enable_thinking: bool,
         constraint: Option<crate::constrained::ConstrainedGenerator>,
         images: Option<Vec<ProcessedImage>>,
+        _session_id: Option<&str>,
     ) -> Result<(), EngineError> {
         if images.is_some() {
             return Err(EngineError::Generation(

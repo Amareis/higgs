@@ -50,7 +50,6 @@ pub async fn chat_completions(
             None
         }
     });
-    let images = extract_images(&req.messages).await?;
 
     let resolved = state
         .router
@@ -65,12 +64,35 @@ pub async fn chat_completions(
             routing_method,
         } => {
             req.model = model_name;
+
+            // Preprocess images once, reusing session cache when available.
+            let processed_images = if let Some(session_id) = req.session_id.as_deref()
+                && let Some(cached) = engine.get_session_images(session_id)
+            {
+                tracing::info!(
+                    session_id,
+                    count = cached.len(),
+                    "Session image cache hit — skipping download and preprocess"
+                );
+                cached
+            } else {
+                let raw_images = extract_images(&req.messages).await?;
+                let mut processed = Vec::with_capacity(raw_images.len());
+                for (url, bytes) in raw_images {
+                    let img = engine
+                        .preprocess_image_bytes(&bytes)
+                        .map_err(ServerError::Engine)?;
+                    processed.push(img);
+                }
+                processed
+            };
+
             if req.stream == Some(true) {
                 let stream = chat_completions_stream(
                     Arc::clone(&state),
                     req,
                     engine,
-                    images,
+                    processed_images,
                     state.metrics.clone(),
                     routing_method,
                 )?;
@@ -78,9 +100,13 @@ pub async fn chat_completions(
                 Ok(sse.into_response())
             } else {
                 let start = Instant::now();
-                let response =
-                    chat_completions_non_streaming(Arc::clone(&state), req, engine, images)
-                        .await?;
+                let response = chat_completions_non_streaming(
+                    Arc::clone(&state),
+                    req,
+                    engine,
+                    processed_images,
+                )
+                .await?;
                 if let Some(ref metrics) = state.metrics {
                     metrics.record(RequestRecord {
                         id: 0,
@@ -255,7 +281,7 @@ async fn chat_completions_non_streaming(
     state: SharedState,
     req: ChatCompletionRequest,
     engine: Arc<Engine>,
-    images: Vec<Vec<u8>>,
+    images: Vec<higgs_models::ProcessedImage>,
 ) -> Result<ChatCompletionResponse, ServerError> {
     let max_tokens = req.max_tokens.unwrap_or(state.config.server.max_tokens);
     let sampling = build_sampling_params(&req);
@@ -271,17 +297,9 @@ async fn chat_completions_non_streaming(
         req.reasoning.as_ref(),
     );
 
-    // Preprocess images and prepare multimodal prompt
     let (prompt_tokens, images_data) = if !images.is_empty() && engine.is_vlm() {
-        let mut processed_images = Vec::with_capacity(images.len());
-        for img_bytes in &images {
-            let img = engine
-                .preprocess_image_bytes(img_bytes)
-                .map_err(ServerError::Engine)?;
-            processed_images.push(img);
-        }
         engine
-            .prepare_multimodal_prompt(&messages, &processed_images, tools, thinking_enabled)
+            .prepare_multimodal_prompt(&messages, &images, tools, thinking_enabled)
             .map_err(ServerError::Engine)?
     } else {
         let tokens = engine
@@ -292,6 +310,7 @@ async fn chat_completions_non_streaming(
 
     let constraint = build_constraint(req.response_format.as_ref(), &engine)?;
 
+    let session_id = req.session_id.clone();
     let tokenizer = engine.tokenizer().clone();
     let output = tokio::task::spawn_blocking(move || {
         engine.generate_with_thinking(
@@ -304,6 +323,7 @@ async fn chat_completions_non_streaming(
             thinking_enabled,
             constraint,
             images_data,
+            session_id.as_deref(),
         )
     })
     .await
@@ -409,7 +429,7 @@ fn chat_completions_stream(
     state: SharedState,
     req: ChatCompletionRequest,
     engine: Arc<Engine>,
-    images: Vec<Vec<u8>>,
+    images: Vec<higgs_models::ProcessedImage>,
     metrics: Option<Arc<MetricsStore>>,
     routing_method: crate::router::RoutingMethod,
 ) -> Result<impl Stream<Item = Result<Event, Infallible>>, ServerError> {
@@ -439,17 +459,9 @@ fn chat_completions_stream(
         req.reasoning.as_ref(),
     );
 
-    // Preprocess images and prepare multimodal prompt
     let (prompt_tokens, images_data) = if !images.is_empty() && engine.is_vlm() {
-        let mut processed_images = Vec::with_capacity(images.len());
-        for img_bytes in &images {
-            let img = engine
-                .preprocess_image_bytes(img_bytes)
-                .map_err(ServerError::Engine)?;
-            processed_images.push(img);
-        }
         engine
-            .prepare_multimodal_prompt(&messages, &processed_images, None, thinking_enabled_stream)
+            .prepare_multimodal_prompt(&messages, &images, None, thinking_enabled_stream)
             .map_err(ServerError::Engine)?
     } else {
         let tokens = engine
@@ -500,6 +512,7 @@ fn chat_completions_stream(
             thinking_enabled_stream,
             constraint,
             images_data,
+            req.session_id.as_deref(),
         );
         if let Err(e) = result {
             tracing::error!(error = %e, "Generation error during streaming");
@@ -658,22 +671,33 @@ fn convert_messages(
 
 /// Extract image bytes from message content parts.
 /// Supports base64 data URIs and HTTP/HTTPS URLs (fetched via reqwest).
+/// Returns pairs of (url_or_data_uri, decoded_bytes).
 async fn extract_images(
     messages: &[ChatCompletionMessage],
-) -> Result<Vec<Vec<u8>>, ServerError> {
+) -> Result<Vec<(String, Vec<u8>)>, ServerError> {
     use base64::Engine as _;
     let mut images = Vec::new();
+    let total_start = std::time::Instant::now();
     for msg in messages {
         let Some(content) = &msg.content else {
             continue;
         };
         for url in content.image_urls() {
+            let url_start = std::time::Instant::now();
             if let Some(data) = url.strip_prefix("data:") {
                 // data:[<mediatype>];base64,<data>
                 if let Some(base64_start) = data.find(";base64,") {
                     let encoded = &data[base64_start + 8..];
                     match base64::engine::general_purpose::STANDARD.decode(encoded) {
-                        Ok(bytes) => images.push(bytes),
+                        Ok(bytes) => {
+                            tracing::info!(
+                                url = %url.get(..32).unwrap_or(url),
+                                size = bytes.len(),
+                                elapsed_ms = url_start.elapsed().as_millis(),
+                                "Decoded base64 image"
+                            );
+                            images.push((url.to_owned(), bytes));
+                        }
                         Err(e) => tracing::warn!(error = %e, "Failed to decode base64 image"),
                     }
                 }
@@ -682,7 +706,15 @@ async fn extract_images(
                     Ok(response) => {
                         if response.status().is_success() {
                             match response.bytes().await {
-                                Ok(bytes) => images.push(bytes.to_vec()),
+                                Ok(bytes) => {
+                                    tracing::info!(
+                                        url = %url,
+                                        size = bytes.len(),
+                                        elapsed_ms = url_start.elapsed().as_millis(),
+                                        "Fetched image URL"
+                                    );
+                                    images.push((url.to_owned(), bytes.to_vec()));
+                                }
                                 Err(e) => {
                                     tracing::warn!(url, error = %e, "Failed to read image bytes");
                                 }
@@ -698,6 +730,11 @@ async fn extract_images(
             }
         }
     }
+    tracing::info!(
+        count = images.len(),
+        total_ms = total_start.elapsed().as_millis(),
+        "Image extraction complete"
+    );
     Ok(images)
 }
 

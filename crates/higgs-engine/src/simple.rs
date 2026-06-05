@@ -6,8 +6,10 @@
     clippy::manual_let_else
 )]
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use higgs_models::{
     AnyCache, AnyModel, LogprobArrays, ProcessedImage, SamplingParams, apply_penalties, sample,
@@ -33,8 +35,15 @@ use crate::{
 };
 
 /// Default maximum number of cached prefixes.
-const DEFAULT_PREFIX_CACHE_SIZE: usize = 8;
+/// Set to 0 because explicit session cache covers all cross-request reuse
+/// (classify→extract→normalize), and the radix prefix cache only wastes
+/// RAM holding stale multimodal entries that can never be safely hit.
+const DEFAULT_PREFIX_CACHE_SIZE: usize = 0;
 const DEFAULT_PAGED_KV_BLOCK_SIZE: usize = 64;
+/// Default maximum number of explicitly pinned sessions.
+const DEFAULT_MAX_SESSIONS: usize = 8;
+/// Default TTL for a session entry (5 minutes).
+const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(300);
 
 /// Acquire a `Mutex` lock, recovering from poison by reusing the inner data.
 /// Used in this crate to keep session-management methods infallible while
@@ -182,6 +191,19 @@ pub struct Session {
     pub max_tokens: usize,
 }
 
+/// Cached KV state for an explicit client session.
+#[derive(Debug, Clone)]
+struct SessionEntry {
+    /// The KV cache after the last prefill.
+    cache: AnyCache,
+    /// Token sequence that was prefilled (without generation suffix).
+    prompt_tokens: Vec<u32>,
+    /// Last time this session was accessed.
+    last_accessed: Instant,
+    /// Preprocessed images reused across classify → extract.
+    processed_images: Option<Vec<ProcessedImage>>,
+}
+
 /// Simple single-request inference engine with paged KV caching.
 ///
 /// Uses paged KV cache for efficient memory management during single-request
@@ -196,6 +218,12 @@ pub struct SimpleEngine {
     scheduler: Mutex<RoundRobinScheduler>,
     /// Active sessions
     sessions: Mutex<std::collections::HashMap<u64, Session>>,
+    /// Explicit session cache for cross-request KV persistence.
+    session_cache: Mutex<HashMap<String, SessionEntry>>,
+    /// Maximum number of session entries before LRU eviction.
+    max_sessions: usize,
+    /// TTL for session entries.
+    session_ttl: Duration,
     tokenizer: Tokenizer,
     template: Option<ChatTemplateRenderer>,
     model_name: String,
@@ -220,6 +248,10 @@ struct PreparedGeneration<'a> {
     prompt_array: Array,
     prompt_len: u32,
     images: Vec<higgs_models::ProcessedImage>,
+    /// Whether the KV cache was restored from an explicit session entry.
+    /// When true and the request is multimodal, the model can skip vision
+    /// processing because the vision features are already in the cache.
+    used_session_cache: bool,
 }
 
 impl SimpleEngine {
@@ -383,6 +415,9 @@ impl SimpleEngine {
             paged_cache: paged_cache.map(Mutex::new),
             scheduler: Mutex::new(RoundRobinScheduler::new()),
             sessions: Mutex::new(std::collections::HashMap::new()),
+            session_cache: Mutex::new(HashMap::new()),
+            max_sessions: DEFAULT_MAX_SESSIONS,
+            session_ttl: DEFAULT_SESSION_TTL,
             tokenizer,
             template,
             model_name,
@@ -466,6 +501,7 @@ impl SimpleEngine {
 
         // Build message copies with vision tokens injected into content
         let mut image_idx = 0usize;
+        let mut total_vision_tokens = 0i32;
         let processed_messages: Vec<ChatMessage> = messages
             .iter()
             .map(|m| {
@@ -484,6 +520,7 @@ impl SimpleEngine {
                                     let num_tokens = grid.map_or(1, |(t, h, w)| {
                                         (t * h * w / (merge_size * merge_size)).max(1)
                                     });
+                                    total_vision_tokens += num_tokens;
                                     vision_parts.push_str("<|vision_start|>");
                                     for _ in 0..num_tokens {
                                         vision_parts.push_str("<|image_pad|>");
@@ -535,7 +572,18 @@ impl SimpleEngine {
             }
         }
 
-        let images_out = if images.is_empty() { None } else { Some(images.to_vec()) };
+        if !images.is_empty() {
+            tracing::info!(
+                num_images = images.len(),
+                total_vision_tokens,
+                "Prepared multimodal prompt"
+            );
+        }
+        let images_out = if images.is_empty() {
+            None
+        } else {
+            Some(images.to_vec())
+        };
         Ok((prompt_tokens, images_out))
     }
 
@@ -586,6 +634,21 @@ impl SimpleEngine {
         }
     }
 
+    /// Retrieve preprocessed images from an explicit session, if any.
+    pub fn get_session_images(&self, session_id: &str) -> Option<Vec<ProcessedImage>> {
+        let sc = lock_or_recover(&self.session_cache);
+        sc.get(session_id)
+            .and_then(|entry| entry.processed_images.clone())
+    }
+
+    /// Store preprocessed images into an explicit session.
+    pub fn store_session_images(&self, session_id: &str, images: Vec<ProcessedImage>) {
+        let mut sc = lock_or_recover(&self.session_cache);
+        if let Some(entry) = sc.get_mut(session_id) {
+            entry.processed_images = Some(images);
+        }
+    }
+
     /// Convert prompt length to u32, returning a descriptive error on overflow.
     fn prompt_len(prompt_tokens: &[u32]) -> Result<u32, EngineError> {
         prompt_tokens
@@ -600,13 +663,55 @@ impl SimpleEngine {
         &self,
         prompt_tokens: &[u32],
         images: Option<Vec<higgs_models::ProcessedImage>>,
+        session_id: Option<&str>,
     ) -> Result<PreparedGeneration<'_>, EngineError> {
         let prompt_len = Self::prompt_len(prompt_tokens)?;
         let has_images = images.as_ref().map_or(false, |v| !v.is_empty());
 
-        // Skip prefix caching for multimodal requests: different images
-        // produce different KV states even with identical token sequences.
-        let prefix_match = if has_images {
+        // Explicit session cache takes precedence: when a client provides a
+        // session_id we look for the longest common prefix between the cached
+        // prompt and the current one, trim the cache if needed, and prefill
+        // only the suffix. This allows classify → extract sharing even when
+        // the trailing instruction differs.
+        let session_match = session_id.and_then(|sid| {
+            let mut sc = lock_or_recover(&self.session_cache);
+            sc.get_mut(sid).and_then(|entry| {
+                let cached_len = entry.prompt_tokens.len();
+                let common_len = entry
+                    .prompt_tokens
+                    .iter()
+                    .zip(prompt_tokens.iter())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                if common_len > 0 {
+                    tracing::info!(
+                        session_id = sid,
+                        cached_len,
+                        common_len,
+                        suffix_len = prompt_tokens.len() - common_len,
+                        "Session cache hit — reusing cached prefix"
+                    );
+                    entry.last_accessed = Instant::now();
+                    let mut cache = entry.cache.clone();
+                    if common_len < cached_len {
+                        cache.trim_by(cached_len - common_len);
+                    }
+                    let suffix = prompt_tokens.get(common_len..).unwrap_or_default();
+                    Some((suffix.to_vec(), cache))
+                } else {
+                    tracing::info!(
+                        session_id = sid,
+                        cached_len,
+                        prompt_len = prompt_tokens.len(),
+                        "Session cache miss — falling back to fresh prefill"
+                    );
+                    None
+                }
+            })
+        });
+
+        // Fallback to radix prefix cache for text-only non-session requests.
+        let prefix_match = if session_match.is_some() || has_images {
             None
         } else {
             let mut pc = self
@@ -621,8 +726,25 @@ impl SimpleEngine {
             .lock()
             .map_err(|e| EngineError::Generation(format!("Model lock poisoned: {e}")))?;
 
-        let (actual_prompt_tokens, cache) = if let Some(matched) = prefix_match {
-            tracing::debug!(
+        let mut used_session_cache = false;
+        let (actual_prompt_tokens, cache) = if let Some((suffix, cached)) = session_match {
+            if suffix.is_empty() {
+                tracing::info!(
+                    prompt_len = prompt_tokens.len(),
+                    "Full session hit requires cached logits; falling back to fresh prefill"
+                );
+                (
+                    prompt_tokens.to_vec(),
+                    model
+                        .make_cache_with_config(self.kv_cache_config)
+                        .map_err(EngineError::Mlx)?,
+                )
+            } else {
+                used_session_cache = true;
+                (suffix, cached)
+            }
+        } else if let Some(matched) = prefix_match {
+            tracing::info!(
                 prefix_len = matched.prefix_len,
                 total_len = prompt_tokens.len(),
                 suffix_len = prompt_tokens.len() - matched.prefix_len,
@@ -630,7 +752,7 @@ impl SimpleEngine {
             );
             let suffix = prompt_tokens.get(matched.prefix_len..).unwrap_or_default();
             if suffix.is_empty() {
-                tracing::debug!(
+                tracing::info!(
                     prompt_len = prompt_tokens.len(),
                     "Full prefix hit requires cached logits; falling back to fresh prefill"
                 );
@@ -644,6 +766,12 @@ impl SimpleEngine {
                 (suffix.to_vec(), matched.cache)
             }
         } else {
+            tracing::info!(
+                has_session = session_id.is_some(),
+                has_images,
+                prompt_len = prompt_tokens.len(),
+                "Cache miss — running full prefill"
+            );
             (
                 prompt_tokens.to_vec(),
                 model
@@ -660,11 +788,13 @@ impl SimpleEngine {
             prompt_array,
             prompt_len,
             images: images.unwrap_or_default(),
+            used_session_cache,
         })
     }
 
     /// Run the prefill forward pass and sample the first token. Stores the
-    /// post-prefill KV state back into the prefix cache (skipped for multimodal).
+    /// post-prefill KV state back into the prefix cache (skipped for multimodal)
+    /// or into the explicit session cache when `session_id` is provided.
     /// Optionally computes logprobs for the first token.
     fn run_prefill(
         &self,
@@ -673,13 +803,37 @@ impl SimpleEngine {
         params: &SamplingParams,
         logprob_top_n: Option<u32>,
         constraint: Option<&crate::constrained::ConstrainedGenerator>,
+        session_id: Option<&str>,
     ) -> Result<(Array, Option<LogprobArrays>), EngineError> {
         let logits = if !prepared.images.is_empty() {
-            // Multimodal path: full forward (VLMs need all tokens for vision)
-            prepared
-                .model
-                .forward_multimodal(&prepared.prompt_array, &prepared.images, &mut prepared.cache)
-                .map_err(EngineError::Mlx)?
+            if prepared.used_session_cache {
+                // Session cache hit: vision features are already in the KV cache.
+                // Skip vision tower and merge — just run the suffix embeddings
+                // through the transformer.
+                tracing::info!(
+                    suffix_len = prepared.prompt_array.shape().get(1).copied().unwrap_or(0),
+                    "Multimodal session hit — skipping vision processing"
+                );
+                let embeds = prepared
+                    .model
+                    .embed_tokens_forward(&prepared.prompt_array)
+                    .map_err(EngineError::Mlx)?;
+                prepared
+                    .model
+                    .forward_embedded(&embeds, &mut prepared.cache)
+                    .map_err(EngineError::Mlx)?
+            } else {
+                // Fresh multimodal prefill: process images through vision tower
+                // and merge features into text embeddings.
+                prepared
+                    .model
+                    .forward_multimodal(
+                        &prepared.prompt_array,
+                        &prepared.images,
+                        &mut prepared.cache,
+                    )
+                    .map_err(EngineError::Mlx)?
+            }
         } else {
             // Text-only prefill: use chunked prefill for long sequences to bound
             // peak memory, otherwise single-pass with last-token-only LM head.
@@ -732,8 +886,56 @@ impl SimpleEngine {
             eval(eval_targets).map_err(EngineError::Mlx)?;
         }
 
-        // Skip prefix cache for multimodal (image-specific KV states)
-        if prepared.images.is_empty() {
+        // Store into explicit session cache when requested.
+        if let Some(sid) = session_id {
+            let mut sc = lock_or_recover(&self.session_cache);
+            let cache_key = prompt_tokens
+                .get(
+                    ..prompt_tokens
+                        .len()
+                        .saturating_sub(self.gen_prompt_suffix_len),
+                )
+                .unwrap_or(prompt_tokens)
+                .to_vec();
+            tracing::info!(
+                session_id = sid,
+                key_len = cache_key.len(),
+                "Storing prefix in session cache"
+            );
+            sc.insert(
+                sid.to_owned(),
+                SessionEntry {
+                    cache: prepared.cache.clone(),
+                    prompt_tokens: cache_key,
+                    last_accessed: Instant::now(),
+                    processed_images: Some(prepared.images.clone()),
+                },
+            );
+            // Evict expired entries.
+            let before = sc.len();
+            sc.retain(|_, entry| entry.last_accessed.elapsed() < self.session_ttl);
+            let expired = before - sc.len();
+            // Evict oldest if over capacity.
+            let mut evicted = expired;
+            while sc.len() > self.max_sessions {
+                let oldest_key = sc
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.last_accessed)
+                    .map(|(k, _)| k.clone());
+                if let Some(key) = oldest_key {
+                    sc.remove(&key);
+                    evicted += 1;
+                } else {
+                    break;
+                }
+            }
+            if evicted > 0 {
+                tracing::info!(evicted, remaining = sc.len(), "Session cache eviction");
+            }
+        }
+
+        // Also store into radix prefix cache for text-only non-session requests.
+        if session_id.is_none() && prepared.images.is_empty() {
             let mut pc = self
                 .prefix_cache
                 .lock()
@@ -748,6 +950,7 @@ impl SimpleEngine {
                         .saturating_sub(self.gen_prompt_suffix_len),
                 )
                 .unwrap_or(prompt_tokens);
+            tracing::info!(key_len = cache_key.len(), "Storing prefix in radix cache");
             pc.store(cache_key, &prepared.cache);
         }
         maybe_clear_mlx_cache(
@@ -980,6 +1183,7 @@ impl SimpleEngine {
             self.enable_thinking,
             constraint,
             images,
+            None,
         )
     }
 
@@ -995,6 +1199,7 @@ impl SimpleEngine {
         enable_thinking: bool,
         constraint: Option<crate::constrained::ConstrainedGenerator>,
         images: Option<Vec<ProcessedImage>>,
+        session_id: Option<&str>,
     ) -> Result<GenerationOutput, EngineError> {
         if prompt_tokens.is_empty() {
             return Err(EngineError::Generation("Prompt is empty".to_owned()));
@@ -1022,6 +1227,7 @@ impl SimpleEngine {
                 enable_thinking,
                 constraint,
                 images,
+                session_id,
             )
         })
     }
@@ -1042,10 +1248,11 @@ impl SimpleEngine {
         enable_thinking: bool,
         mut constraint: Option<crate::constrained::ConstrainedGenerator>,
         images: Option<Vec<ProcessedImage>>,
+        session_id: Option<&str>,
     ) -> Result<GenerationOutput, EngineError> {
         let logprob_top_n = logprobs.then(|| top_logprobs.unwrap_or(0));
 
-        let mut prepared = self.prepare_generation(prompt_tokens, images)?;
+        let mut prepared = self.prepare_generation(prompt_tokens, images, session_id)?;
         let prompt_len = prepared.prompt_len;
         let (current_token, first_logprob_data) = self.run_prefill(
             prompt_tokens,
@@ -1053,6 +1260,7 @@ impl SimpleEngine {
             params,
             logprob_top_n,
             constraint.as_ref(),
+            session_id,
         )?;
 
         // Capture T1 (already eval'd inside run_prefill).
@@ -1858,6 +2066,7 @@ impl SimpleEngine {
             self.enable_thinking,
             constraint,
             images,
+            None,
         )
     }
 
@@ -1874,6 +2083,7 @@ impl SimpleEngine {
         enable_thinking: bool,
         constraint: Option<crate::constrained::ConstrainedGenerator>,
         images: Option<Vec<ProcessedImage>>,
+        session_id: Option<&str>,
     ) -> Result<(), EngineError> {
         if prompt_tokens.is_empty() {
             return Err(EngineError::Generation("Prompt is empty".to_owned()));
@@ -1904,6 +2114,7 @@ impl SimpleEngine {
                 enable_thinking,
                 constraint,
                 images,
+                session_id,
             )
         })
     }
@@ -1925,10 +2136,11 @@ impl SimpleEngine {
         enable_thinking: bool,
         mut constraint: Option<crate::constrained::ConstrainedGenerator>,
         images: Option<Vec<ProcessedImage>>,
+        session_id: Option<&str>,
     ) -> Result<(), EngineError> {
         let logprob_top_n = logprobs.then(|| top_logprobs.unwrap_or(0));
 
-        let mut prepared = self.prepare_generation(prompt_tokens, images)?;
+        let mut prepared = self.prepare_generation(prompt_tokens, images, session_id)?;
         let prompt_len = prepared.prompt_len;
         let (current_token, first_logprob_data) = self.run_prefill(
             prompt_tokens,
@@ -1936,6 +2148,7 @@ impl SimpleEngine {
             params,
             logprob_top_n,
             constraint.as_ref(),
+            session_id,
         )?;
 
         let mut all_tokens: Vec<u32> = Vec::new();

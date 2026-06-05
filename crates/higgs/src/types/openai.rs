@@ -44,6 +44,11 @@ pub struct ChatCompletionRequest {
     /// a non-empty value such as `"low"` to explicitly enable reasoning.
     #[serde(default)]
     pub reasoning: Option<ReasoningConfig>,
+    /// Optional session identifier for explicit KV-cache persistence across
+    /// sequential requests. When provided, Higgs stores the post-prefill cache
+    /// under this key and reuses it on the next request with the same id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// Optional request-level controls for streaming responses.

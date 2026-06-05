@@ -137,6 +137,24 @@ impl Engine {
         }
     }
 
+    pub fn get_session_images(&self, session_id: &str) -> Option<Vec<ProcessedImage>> {
+        match self {
+            Self::Simple(e) => e.get_session_images(session_id),
+            Self::Batch(_) => None,
+            #[cfg(test)]
+            Self::Stub(_) => None,
+        }
+    }
+
+    pub fn store_session_images(&self, session_id: &str, images: Vec<ProcessedImage>) {
+        match self {
+            Self::Simple(e) => e.store_session_images(session_id, images),
+            Self::Batch(_) => {}
+            #[cfg(test)]
+            Self::Stub(_) => {}
+        }
+    }
+
     pub fn prepare_chat_prompt(
         &self,
         messages: &[ChatMessage],
@@ -205,6 +223,7 @@ impl Engine {
             self.enable_thinking(),
             constraint,
             images,
+            None,
         )
     }
 
@@ -220,6 +239,7 @@ impl Engine {
         enable_thinking: bool,
         constraint: Option<higgs_engine::constrained::ConstrainedGenerator>,
         images: Option<Vec<ProcessedImage>>,
+        session_id: Option<&str>,
     ) -> Result<GenerationOutput, EngineError> {
         match self {
             Self::Simple(e) => e.generate_with_thinking(
@@ -232,6 +252,7 @@ impl Engine {
                 enable_thinking,
                 constraint,
                 images,
+                session_id,
             ),
             Self::Batch(e) => e.generate_with_thinking(
                 prompt_tokens,
@@ -243,6 +264,7 @@ impl Engine {
                 enable_thinking,
                 constraint,
                 images,
+                session_id,
             ),
             #[cfg(test)]
             Self::Stub(_) => Err(EngineError::Generation("test stub".to_owned())),
@@ -273,6 +295,7 @@ impl Engine {
             self.enable_thinking(),
             constraint,
             images,
+            None,
         )
     }
 
@@ -289,6 +312,7 @@ impl Engine {
         enable_thinking: bool,
         constraint: Option<higgs_engine::constrained::ConstrainedGenerator>,
         images: Option<Vec<ProcessedImage>>,
+        session_id: Option<&str>,
     ) -> Result<(), EngineError> {
         match self {
             Self::Simple(e) => e.generate_streaming_with_thinking(
@@ -302,6 +326,7 @@ impl Engine {
                 enable_thinking,
                 constraint,
                 images,
+                session_id,
             ),
             Self::Batch(e) => e.generate_streaming_with_thinking(
                 prompt_tokens,
@@ -314,6 +339,7 @@ impl Engine {
                 enable_thinking,
                 constraint,
                 images,
+                session_id,
             ),
             #[cfg(test)]
             Self::Stub(_) => Err(EngineError::Generation("test stub".to_owned())),

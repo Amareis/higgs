@@ -121,6 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 false, // enable_thinking
                 None,
                 images_data,
+                None,
             )
         }
     });

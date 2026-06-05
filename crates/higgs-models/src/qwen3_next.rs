@@ -3557,26 +3557,28 @@ impl Qwen3NextCausalLM {
         if images.is_empty() {
             return Err(Exception::custom("no images provided"));
         }
-        let pixel_values = if images.len() == 1 {
-            images[0].pixel_values.clone()
-        } else {
-            let arrays: Vec<&mlx_rs::Array> = images.iter().map(|i| &i.pixel_values).collect();
-            mlx_rs::ops::concatenate_axis(&arrays, 0)?
-        };
-        let grid_thw = if images.len() == 1 {
-            images[0].grid_thw.clone().ok_or_else(|| Exception::custom("grid_thw required"))?
-        } else {
-            let arrays: Vec<&mlx_rs::Array> = images.iter().filter_map(|i| i.grid_thw.as_ref()).collect();
-            if arrays.len() != images.len() {
-                return Err(Exception::custom("grid_thw required for all images"));
-            }
-            mlx_rs::ops::concatenate_axis(&arrays, 0)?
-        };
         let vision = self
             .vision
             .as_mut()
             .ok_or_else(|| Exception::custom("vision tower not loaded"))?;
-        let vision_features = vision.forward(&pixel_values, &grid_thw)?;
+
+        // Process each image individually through the vision tower so that
+        // the attention scores matrix never grows quadratically with the
+        // total number of images. Each image gets its own forward pass with
+        // seq_len = grid_h * grid_w (a few thousand patches), then the
+        // resulting features are concatenated along axis 0.
+        let mut all_features: Vec<Array> = Vec::with_capacity(images.len());
+        for img in images {
+            let grid_thw = img
+                .grid_thw
+                .as_ref()
+                .ok_or_else(|| Exception::custom("grid_thw required for all images"))?;
+            let features = vision.forward(&img.pixel_values, grid_thw)?;
+            all_features.push(features);
+        }
+        let feature_refs: Vec<&Array> = all_features.iter().collect();
+        let vision_features = mlx_rs::ops::concatenate_axis(&feature_refs, 0)?;
+
         let inputs_embeds = self.embed_tokens_forward(input_ids)?;
         let merged = crate::qwen3_vl_vision::merge_input_ids_with_image_features(
             &vision_features,
@@ -4157,9 +4159,21 @@ fn try_attach_vision(model: &mut Qwen3NextCausalLM, model_path: &Path) -> Result
         .map_or(-1, |v| v as i32);
     // Qwen3-VL uses dynamic image sizes; default to 448 for preprocessing hints.
     model.image_size = 448;
-    model.processor_params = Some(crate::load_image_processor_params(
-        model_path.to_str().unwrap_or(""),
-    ));
+    let mut params = crate::load_image_processor_params(model_path.to_str().unwrap_or(""));
+    // Clamp max_pixels to the mlx-vlm default (1003520) to avoid OOM on large
+    // images. The processor_config.json shipped with some Qwen3.5 checkpoints
+    // sets max_pixels to 16777216 which causes the vision attention scores
+    // matrix to explode (quadratic in grid_h * grid_w).
+    const SAFE_MAX_PIXELS: i32 = 14 * 14 * 4 * 1280; // 1_003_520
+    if params.max_pixels > SAFE_MAX_PIXELS {
+        tracing::warn!(
+            old_max_pixels = params.max_pixels,
+            safe_max_pixels = SAFE_MAX_PIXELS,
+            "Clamping max_pixels to safe default"
+        );
+        params.max_pixels = SAFE_MAX_PIXELS;
+    }
+    model.processor_params = Some(params);
 
     tracing::info!("Vision tower attached to Qwen3Next model");
     Ok(())

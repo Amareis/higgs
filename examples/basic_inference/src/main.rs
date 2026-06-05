@@ -123,6 +123,7 @@ async fn generate_turn(
             enable_thinking,
             None,
             None,
+            None,
         )
     });
 

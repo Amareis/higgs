@@ -64,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 enable_thinking,
                 None,
                 None,
+                None,
             )
         }
     });

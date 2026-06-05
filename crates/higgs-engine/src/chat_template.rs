@@ -385,6 +385,7 @@ TOOLS:{{ tools | length }}
                 "type": "function",
                 "function": {"name": "get_weather", "arguments": "{\"city\":\"NYC\"}"}
             })]),
+            num_images: 0,
         }];
         let result = renderer.apply(&messages, None, false).unwrap();
         assert!(result.contains("[tools]"));
