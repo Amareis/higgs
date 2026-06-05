@@ -3019,6 +3019,7 @@ pub struct Qwen3NextCausalLM {
     pub vision: Option<crate::qwen3_vl_vision::Qwen3VisionModel>,
     pub image_token_index: i32,
     pub image_size: i32,
+    pub processor_params: Option<crate::ImageProcessorParams>,
 }
 
 // Manual RoPE implementation for arbitrary positions
@@ -3146,6 +3147,7 @@ impl Qwen3NextCausalLM {
             vision: None,
             image_token_index: -1,
             image_size: 224,
+            processor_params: None,
         })
     }
 
@@ -4155,6 +4157,9 @@ fn try_attach_vision(model: &mut Qwen3NextCausalLM, model_path: &Path) -> Result
         .map_or(-1, |v| v as i32);
     // Qwen3-VL uses dynamic image sizes; default to 448 for preprocessing hints.
     model.image_size = 448;
+    model.processor_params = Some(crate::load_image_processor_params(
+        model_path.to_str().unwrap_or(""),
+    ));
 
     tracing::info!("Vision tower attached to Qwen3Next model");
     Ok(())

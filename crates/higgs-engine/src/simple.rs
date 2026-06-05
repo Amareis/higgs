@@ -557,6 +557,20 @@ impl SimpleEngine {
         model.image_size()
     }
 
+    /// Preprocess raw image bytes for this model's vision encoder.
+    pub fn preprocess_image_bytes(
+        &self,
+        image_bytes: &[u8],
+    ) -> Result<higgs_models::ProcessedImage, EngineError> {
+        let model = self
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        model
+            .preprocess_image_bytes(image_bytes)
+            .map_err(|e| EngineError::Generation(format!("image preprocessing: {e}")))
+    }
+
     /// Replace image placeholder tokens with `IMAGE_TOKEN_INDEX` in the token
     /// sequence. The `<image>` token ID is looked up from the tokenizer.
     #[allow(clippy::as_conversions, clippy::cast_sign_loss)]

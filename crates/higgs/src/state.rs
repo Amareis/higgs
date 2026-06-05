@@ -112,6 +112,22 @@ impl Engine {
         }
     }
 
+    pub fn preprocess_image_bytes(
+        &self,
+        image_bytes: &[u8],
+    ) -> Result<ProcessedImage, EngineError> {
+        match self {
+            Self::Simple(e) => e.preprocess_image_bytes(image_bytes),
+            Self::Batch(_) => Err(EngineError::Generation(
+                "Batch engine does not support images".to_owned(),
+            )),
+            #[cfg(test)]
+            Self::Stub(_) => Err(EngineError::Generation(
+                "Stub engine cannot preprocess images".to_owned(),
+            )),
+        }
+    }
+
     pub fn replace_image_tokens(&self, tokens: &mut [u32]) {
         match self {
             Self::Simple(e) => e.replace_image_tokens(tokens),

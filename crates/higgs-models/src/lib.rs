@@ -692,6 +692,48 @@ impl AnyModel {
         }
     }
 
+    /// Preprocess raw image bytes into the format expected by this model's
+    /// vision encoder.
+    ///
+    /// Returns an error for text-only models.
+    pub fn preprocess_image_bytes(
+        &self,
+        image_bytes: &[u8],
+    ) -> Result<ProcessedImage, Exception> {
+        match self {
+            Self::LlavaQwen2(m) => {
+                let size = u32::try_from(m.image_size())
+                    .map_err(|e| Exception::custom(format!("invalid image size: {e}")))?;
+                let pixel_values = crate::siglip::preprocess_image(image_bytes, size)
+                    .map_err(|e| Exception::custom(format!("siglip preprocessing failed: {e}")))?;
+                Ok(ProcessedImage {
+                    pixel_values,
+                    grid_thw: None,
+                })
+            }
+            Self::Qwen3Next(m) => {
+                let params = m.processor_params.ok_or_else(|| {
+                    Exception::custom("Qwen3Next model has no processor params loaded")
+                })?;
+                let img = image::load_from_memory(image_bytes).map_err(|e| {
+                    Exception::custom(format!("failed to decode image: {e}"))
+                })?;
+                let rgb = img.to_rgb8();
+                crate::qwen3_vl_processor::process_image(
+                    &rgb.into(),
+                    params.patch_size,
+                    params.temporal_patch_size,
+                    params.merge_size,
+                    params.min_pixels,
+                    params.max_pixels,
+                )
+            }
+            _ => Err(Exception::custom(
+                "Model does not support image preprocessing",
+            )),
+        }
+    }
+
     /// Forward pass for multimodal input (text + image).
     ///
     /// `input_ids` should contain `IMAGE_TOKEN_INDEX` (-200 as i32) at positions

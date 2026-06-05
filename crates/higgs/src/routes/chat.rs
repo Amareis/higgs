@@ -50,6 +50,8 @@ pub async fn chat_completions(
             None
         }
     });
+    let images = extract_images(&req.messages).await?;
+
     let resolved = state
         .router
         .resolve(&req.model, messages_json.as_deref())
@@ -68,6 +70,7 @@ pub async fn chat_completions(
                     Arc::clone(&state),
                     req,
                     engine,
+                    images,
                     state.metrics.clone(),
                     routing_method,
                 )?;
@@ -76,7 +79,8 @@ pub async fn chat_completions(
             } else {
                 let start = Instant::now();
                 let response =
-                    chat_completions_non_streaming(Arc::clone(&state), req, engine).await?;
+                    chat_completions_non_streaming(Arc::clone(&state), req, engine, images)
+                        .await?;
                 if let Some(ref metrics) = state.metrics {
                     metrics.record(RequestRecord {
                         id: 0,
@@ -251,6 +255,7 @@ async fn chat_completions_non_streaming(
     state: SharedState,
     req: ChatCompletionRequest,
     engine: Arc<Engine>,
+    images: Vec<Vec<u8>>,
 ) -> Result<ChatCompletionResponse, ServerError> {
     let max_tokens = req.max_tokens.unwrap_or(state.config.server.max_tokens);
     let sampling = build_sampling_params(&req);
@@ -258,8 +263,6 @@ async fn chat_completions_non_streaming(
     let want_logprobs = req.logprobs.unwrap_or(false);
     let top_logprobs = req.top_logprobs;
 
-    // Extract images from message content parts
-    let images = extract_images(&req.messages);
     let messages = convert_messages(&req.messages);
     let tools = req.tools.as_deref();
     let thinking_enabled = crate::reasoning::effective_thinking_enabled(
@@ -270,18 +273,12 @@ async fn chat_completions_non_streaming(
 
     // Preprocess images and prepare multimodal prompt
     let (prompt_tokens, images_data) = if !images.is_empty() && engine.is_vlm() {
-        let image_size = engine.vlm_image_size().unwrap_or(384);
-        #[allow(clippy::as_conversions, clippy::cast_sign_loss)]
-        let size = image_size as u32;
         let mut processed_images = Vec::with_capacity(images.len());
         for img_bytes in &images {
-            let pv = higgs_models::siglip::preprocess_image(img_bytes, size).map_err(|e| {
-                ServerError::InternalError(format!("Image preprocessing failed: {e}"))
-            })?;
-            processed_images.push(higgs_models::ProcessedImage {
-                pixel_values: pv,
-                grid_thw: None,
-            });
+            let img = engine
+                .preprocess_image_bytes(img_bytes)
+                .map_err(ServerError::Engine)?;
+            processed_images.push(img);
         }
         engine
             .prepare_multimodal_prompt(&messages, &processed_images, tools, thinking_enabled)
@@ -412,6 +409,7 @@ fn chat_completions_stream(
     state: SharedState,
     req: ChatCompletionRequest,
     engine: Arc<Engine>,
+    images: Vec<Vec<u8>>,
     metrics: Option<Arc<MetricsStore>>,
     routing_method: crate::router::RoutingMethod,
 ) -> Result<impl Stream<Item = Result<Event, Infallible>>, ServerError> {
@@ -434,8 +432,6 @@ fn chat_completions_stream(
     let want_logprobs = req.logprobs.unwrap_or(false);
     let top_logprobs = req.top_logprobs;
 
-    // Extract images and inject <image> placeholders for VLMs
-    let images = extract_images(&req.messages);
     let messages = convert_messages(&req.messages);
     let thinking_enabled_stream = crate::reasoning::effective_thinking_enabled(
         engine.enable_thinking(),
@@ -445,18 +441,12 @@ fn chat_completions_stream(
 
     // Preprocess images and prepare multimodal prompt
     let (prompt_tokens, images_data) = if !images.is_empty() && engine.is_vlm() {
-        let image_size = engine.vlm_image_size().unwrap_or(384);
-        #[allow(clippy::as_conversions, clippy::cast_sign_loss)]
-        let size = image_size as u32;
         let mut processed_images = Vec::with_capacity(images.len());
         for img_bytes in &images {
-            let pv = higgs_models::siglip::preprocess_image(img_bytes, size).map_err(|e| {
-                ServerError::InternalError(format!("Image preprocessing failed: {e}"))
-            })?;
-            processed_images.push(higgs_models::ProcessedImage {
-                pixel_values: pv,
-                grid_thw: None,
-            });
+            let img = engine
+                .preprocess_image_bytes(img_bytes)
+                .map_err(ServerError::Engine)?;
+            processed_images.push(img);
         }
         engine
             .prepare_multimodal_prompt(&messages, &processed_images, None, thinking_enabled_stream)
@@ -666,9 +656,11 @@ fn convert_messages(
         .collect()
 }
 
-/// Extract image bytes from base64 data URIs in message content parts.
-/// Returns decoded image bytes for each image found across all messages.
-fn extract_images(messages: &[ChatCompletionMessage]) -> Vec<Vec<u8>> {
+/// Extract image bytes from message content parts.
+/// Supports base64 data URIs and HTTP/HTTPS URLs (fetched via reqwest).
+async fn extract_images(
+    messages: &[ChatCompletionMessage],
+) -> Result<Vec<Vec<u8>>, ServerError> {
     use base64::Engine as _;
     let mut images = Vec::new();
     for msg in messages {
@@ -685,11 +677,28 @@ fn extract_images(messages: &[ChatCompletionMessage]) -> Vec<Vec<u8>> {
                         Err(e) => tracing::warn!(error = %e, "Failed to decode base64 image"),
                     }
                 }
+            } else if url.starts_with("http://") || url.starts_with("https://") {
+                match reqwest::get(url).await {
+                    Ok(response) => {
+                        if response.status().is_success() {
+                            match response.bytes().await {
+                                Ok(bytes) => images.push(bytes.to_vec()),
+                                Err(e) => {
+                                    tracing::warn!(url, error = %e, "Failed to read image bytes");
+                                }
+                            }
+                        } else {
+                            tracing::warn!(url, status = %response.status(), "Failed to fetch image");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(url, error = %e, "Failed to fetch image URL");
+                    }
+                }
             }
-            // HTTP/HTTPS URLs are not supported yet; could be fetched in the future
         }
     }
-    images
+    Ok(images)
 }
 
 fn build_sampling_params(req: &ChatCompletionRequest) -> SamplingParams {
