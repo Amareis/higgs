@@ -659,6 +659,8 @@ impl SimpleEngine {
                 "Released session from cache"
             );
         }
+        // Force MLX to return freed buffers to the OS so that RSS drops.
+        maybe_clear_mlx_cache(true, "session_release");
     }
 
     /// Convert prompt length to u32, returning a descriptive error on overflow.
