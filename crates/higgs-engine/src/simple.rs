@@ -41,7 +41,7 @@ use crate::{
 const DEFAULT_PREFIX_CACHE_SIZE: usize = 0;
 const DEFAULT_PAGED_KV_BLOCK_SIZE: usize = 64;
 /// Default maximum number of explicitly pinned sessions.
-const DEFAULT_MAX_SESSIONS: usize = 8;
+const DEFAULT_MAX_SESSIONS: usize = 1;
 /// Default TTL for a session entry (5 minutes).
 const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(300);
 
@@ -646,6 +646,18 @@ impl SimpleEngine {
         let mut sc = lock_or_recover(&self.session_cache);
         if let Some(entry) = sc.get_mut(session_id) {
             entry.processed_images = Some(images);
+        }
+    }
+
+    /// Drop a session from the explicit cache, freeing its KV memory.
+    pub fn release_session(&self, session_id: &str) {
+        let mut sc = lock_or_recover(&self.session_cache);
+        if sc.remove(session_id).is_some() {
+            tracing::info!(
+                session_id,
+                remaining = sc.len(),
+                "Released session from cache"
+            );
         }
     }
 

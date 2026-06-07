@@ -57,6 +57,15 @@ pub async fn chat_completions(
         .await
         .map_err(ServerError::ModelNotFound)?;
 
+    let release_session = headers
+        .get("x-session-release")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    if release_session {
+        tracing::info!("X-Session-Release header detected — will free session after generation");
+    }
+
     match resolved {
         ResolvedRoute::Higgs {
             engine,
@@ -95,18 +104,26 @@ pub async fn chat_completions(
                     processed_images,
                     state.metrics.clone(),
                     routing_method,
+                    release_session,
                 )?;
                 let sse = Sse::new(stream).keep_alive(KeepAlive::default());
                 Ok(sse.into_response())
             } else {
+                let session_id_for_release = req.session_id.clone();
                 let start = Instant::now();
                 let response = chat_completions_non_streaming(
                     Arc::clone(&state),
                     req,
-                    engine,
+                    engine.clone(),
                     processed_images,
                 )
                 .await?;
+                if release_session {
+                    if let Some(ref sid) = session_id_for_release {
+                        tracing::info!(session_id = %sid, "Releasing session after non-streaming generation");
+                        engine.release_session(sid);
+                    }
+                }
                 if let Some(ref metrics) = state.metrics {
                     metrics.record(RequestRecord {
                         id: 0,
@@ -432,6 +449,7 @@ fn chat_completions_stream(
     images: Vec<higgs_models::ProcessedImage>,
     metrics: Option<Arc<MetricsStore>>,
     routing_method: crate::router::RoutingMethod,
+    release_session: bool,
 ) -> Result<impl Stream<Item = Result<Event, Infallible>>, ServerError> {
     let stream_includes_tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
 
@@ -499,6 +517,8 @@ fn chat_completions_stream(
     });
     let tokenizer = engine.tokenizer().clone();
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    let session_id_for_release = req.session_id.clone();
+    let engine_for_release = Arc::clone(&engine);
 
     tokio::task::spawn_blocking(move || {
         let result = engine.generate_streaming_with_thinking(
@@ -637,6 +657,13 @@ fn chat_completions_stream(
 
         // Send [DONE] sentinel
         yield Ok(Event::default().data("[DONE]"));
+
+        if release_session {
+            if let Some(ref sid) = session_id_for_release {
+                tracing::info!(session_id = %sid, "Releasing session after streaming generation");
+                engine_for_release.release_session(sid);
+            }
+        }
     };
 
     Ok(stream)

@@ -155,6 +155,15 @@ impl Engine {
         }
     }
 
+    pub fn release_session(&self, session_id: &str) {
+        match self {
+            Self::Simple(e) => e.release_session(session_id),
+            Self::Batch(_) => {}
+            #[cfg(test)]
+            Self::Stub(_) => {}
+        }
+    }
+
     pub fn prepare_chat_prompt(
         &self,
         messages: &[ChatMessage],
